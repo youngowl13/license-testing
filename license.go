@@ -31,7 +31,7 @@ func findTOMLFile(root string) (string, error) {
 	var tomlFile string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err // Handle errors during traversal
+			return err
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".toml") {
 			tomlFile = path
@@ -39,13 +39,13 @@ func findTOMLFile(root string) (string, error) {
 		}
 		return nil
 	})
-	if err != nil { // Check for errors from filepath.Walk
+	if err != nil {
 		return "", fmt.Errorf("error walking the path %q: %v", root, err)
 	}
 	if tomlFile == "" {
 		return "", fmt.Errorf("no .toml file found")
 	}
-	return tomlFile, nil // No error
+	return tomlFile, nil
 }
 
 // parseTOMLFile parses a TOML file and extracts dependencies and their versions
@@ -198,6 +198,19 @@ func splitDependencyWrapper(dep string) string {
 	return groupID + "/" + artifactID
 }
 
+// getLicenseInfoWrapper is a wrapper for getLicenseInfo for use in the template.
+func getLicenseInfoWrapper(dep string) string {
+	parts := strings.Split(dep, "/")
+	if len(parts) != 2 {
+		return "Unknown License" // Return a default value or handle error
+	}
+	groupID, artifactID := parts[0], parts[1]
+
+	licenseName, _ := getLicenseInfo(groupID, artifactID, "unknown")
+
+	return licenseName
+}
+
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
 func generateHTMLReport(dependencies map[string]string) error {
 	outputDir := "./license-checker"
@@ -236,12 +249,12 @@ func generateHTMLReport(dependencies map[string]string) error {
 					<tr>
 						<td>{{ splitDependencyWrapper $dep }}</td>
 						<td>{{ $version }}</td>
+						<td>{{ getLicenseInfoWrapper $dep }}</td>
 						{{ $groupID, $artifactID, $err := splitDependency $dep }}
 						{{ if $err }}
 							<td colspan="2">Error: {{ $err }}</td>
 						{{ else }}
 							{{ $license, $url := getLicenseInfo $groupID $artifactID $version }}
-							<td>{{ $license }}</td>
 							<td><a href="{{ $url }}" target="_blank">View Details</a></td>
 						{{ end }}
 					</tr>
@@ -253,7 +266,8 @@ func generateHTMLReport(dependencies map[string]string) error {
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"splitDependencyWrapper": splitDependencyWrapper,
-		"getLicenseInfo":         getLicenseInfo,
+		"getLicenseInfoWrapper":  getLicenseInfoWrapper,
+		"getLicenseInfo": getLicenseInfo,
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
