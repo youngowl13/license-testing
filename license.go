@@ -209,6 +209,7 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
 func generateHTMLReport(dependencies map[string]string) error {
+	fmt.Println("Dependencies:", dependencies)
 	outputDir := "./license-checker"
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
 		os.Mkdir(outputDir, 0755)
