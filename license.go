@@ -99,8 +99,8 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 
 		version, ok := versions[versionRef]
 		if !ok {
-			fmt.Printf("Warning: version reference '%s' not found in 'versions' table.\n", versionRef)
-			continue
+			fmt.Printf("Warning: version reference '%s' not found in 'versions' table for library '%s'.\n", versionRef, libKey)
+			version = "unknown"
 		}
 
 		parts := strings.Split(module, ":")
@@ -321,7 +321,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
-		"isCopyleft": isCopyleft,
+		"isCopyleft":            isCopyleft,
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
