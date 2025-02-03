@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -13,38 +14,34 @@ import (
 	"github.com/pelletier/go-toml"
 )
 
-// License represents the license details from a POM file
 type License struct {
 	Name string `xml:"name"`
 	URL  string `xml:"url"`
 }
 
-// MavenPOM represents the structure of a POM file
 type MavenPOM struct {
 	XMLName  xml.Name  `xml:"project"`
 	Licenses []License `xml:"licenses>license"`
 }
 
-// findTOMLFile searches for a TOML file in the current directory recursively
 func findTOMLFile(root string) (string, error) {
 	var tomlFile string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(info.Name(), ".toml") {
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".toml") {
 			tomlFile = path
-			return filepath.SkipDir
+			return filepath.SkipAll
 		}
 		return nil
 	})
 	if tomlFile == "" {
 		return "", fmt.Errorf("no .toml file found")
 	}
-	return tomlFile, err
+	return tomlFile, nil
 }
 
-// parseTOMLFile parses a TOML file and extracts dependencies and their versions
 func parseTOMLFile(filePath string) (map[string]string, error) {
 	dependencies := make(map[string]string)
 	tree, err := toml.LoadFile(filePath)
@@ -77,55 +74,53 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	return dependencies, nil
 }
 
-// fetchPOM fetches the POM file from Maven Central or Google's Android Maven Repository
 func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
 	groupPath := strings.ReplaceAll(groupID, ".", "/")
-	mavenURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
-	googleURL := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
+	pomURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom",
+		groupPath, artifactID, version, artifactID, version)
 
-	// Try Maven Central
-	resp, err := http.Get(mavenURL)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		defer resp.Body.Close()
-		data, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		var pom MavenPOM
-		err = xml.Unmarshal(data, &pom)
-		if err == nil {
-			return &pom, nil
-		}
+	resp, err := http.Get(pomURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	// Try Google's Android Maven Repository
-	resp, err = http.Get(googleURL)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		defer resp.Body.Close()
-		data, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		var pom MavenPOM
-		err = xml.Unmarshal(data, &pom)
-		if err == nil {
-			return &pom, nil
-		}
-	}
-
-	return nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository")
+	var pom MavenPOM
+	err = xml.Unmarshal(data, &pom)
+	return &pom, err
 }
 
-// getLicenseInfo fetches the license details for a dependency
 func getLicenseInfo(groupID, artifactID, version string) (string, string) {
 	pom, err := fetchPOM(groupID, artifactID, version)
 	if err != nil || len(pom.Licenses) == 0 {
-		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version)
+		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license",
+			groupID, artifactID, version)
 	}
 	return pom.Licenses[0].Name, pom.Licenses[0].URL
 }
 
-// generateHTMLReport generates an HTML report of the dependencies and their licenses
+func splitDependency(depName string) (string, string) {
+	knownFormats := map[string]string{
+		"agp":               "com.android.tools.build:gradle",
+		"androidx-core-ktx": "androidx.core:core-ktx",
+		"appcompat":         "androidx.appcompat:appcompat",
+		"material":          "com.google.android.material:material",
+	}
+
+	if groupArtifact, ok := knownFormats[depName]; ok {
+		parts := strings.Split(groupArtifact, ":")
+		if len(parts) == 2 {
+			return parts[0], parts[1]
+		}
+	}
+	return "Unknown", depName
+}
+
 func generateHTMLReport(dependencies map[string]string) error {
 	outputDir := "./license-checker"
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
@@ -148,11 +143,11 @@ func generateHTMLReport(dependencies map[string]string) error {
     </style>
 </head>
 <body>
-    <h1>Dependency License Report</h1>
+    <h1>Kotlin Dependencies</h1>
     <table>
         <thead>
             <tr>
-                <th>Dependency</th>
+                <th>Package</th>
                 <th>Version</th>
                 <th>License</th>
                 <th>Details</th>
@@ -163,14 +158,10 @@ func generateHTMLReport(dependencies map[string]string) error {
             <tr>
                 <td>{{$dep}}</td>
                 <td>{{$version}}</td>
-                {{ $groupID, $artifactID, $err := splitDependency $dep }}
-                {{ if $err }}
-                <td colspan="2">Error: {{$err}}</td>
-                {{ else }}
-                {{ $license, $url := getLicenseInfo $groupID $artifactID $version }}
+                {{ $group, $artifact := splitDependency $dep }}
+                {{ $license, $url := getLicenseInfo $group $artifact $version }}
                 <td>{{$license}}</td>
                 <td><a href="{{$url}}" target="_blank">View Details</a></td>
-                {{ end }}
             </tr>
             {{end}}
         </tbody>
@@ -179,14 +170,8 @@ func generateHTMLReport(dependencies map[string]string) error {
 </html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
-		"splitDependency": func(dep string) (string, string, error) {
-			parts := strings.Split(dep, "/")
-			if len(parts) != 2 {
-				return "", "", fmt.Errorf("invalid dependency format")
-			}
-			return parts[0], parts[1], nil
-		},
-		"getLicenseInfo": getLicenseInfo,
+		"splitDependency": splitDependency,
+		"getLicenseInfo":  getLicenseInfo,
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
@@ -208,7 +193,6 @@ func generateHTMLReport(dependencies map[string]string) error {
 	return nil
 }
 
-// main is the entry point of the program
 func main() {
 	tomlFilePath, err := findTOMLFile(".")
 	if err != nil {
