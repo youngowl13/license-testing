@@ -220,6 +220,7 @@ func getLicenseInfo(groupID, artifactID, version string) (string, string, string
 	if err != nil || pom == nil || len(pom.Licenses) == 0 {
 		return "Unknown", googleSearchURL, ""
 	}
+	// Ensure to return the actual license URL from the POM
 	return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
 }
 
@@ -325,11 +326,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 					<td>{{ $dep }}</td>
 					<td>{{ $version }}</td>
 					<td>{{ $info.Name }}</td>
-					{{ if eq $info.URL "" }}
-						<td><a href="{{ getGoogleSearchLink $dep $version }}" target="_blank">Search License</a></td>
-					{{ else }}
-						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-					{{ end }}
+					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
 					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
 				</tr>
 				{{end}}
@@ -341,9 +338,6 @@ func generateHTMLReport(dependencies map[string]string) error {
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
 		"isCopyleft":            isCopyleft,
-		"getGoogleSearchLink": func(dep, version string) string {
-			return fmt.Sprintf("https://www.google.com/search?q=%s+%s+license", dep, version)
-		},
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
