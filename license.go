@@ -330,6 +330,15 @@ func main() {
 
 	fmt.Printf("Output saved to: %s\n", outputFilePath)
 
+	// Print the content of output.txt to the console
+	fmt.Println("Content of output.txt:")
+	content, err := ioutil.ReadFile(outputFilePath)
+	if err != nil {
+		fmt.Printf("Error reading output file: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(content))
+
 	if err != nil {
 		fmt.Printf("Error generating report: %v\n", err)
 		os.Exit(1)
