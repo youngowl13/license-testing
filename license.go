@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/xml"
 	"fmt"
 	"html/template"
@@ -75,37 +74,31 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	for _, libKey := range libraries.Keys() {
 		libTree := libraries.Get(libKey)
 		if libTree == nil {
-			fmt.Printf("Warning: entry '%s' not found in libraries table.\n", libKey)
 			continue
 		}
 
 		lib, ok := libTree.(*toml.Tree)
 		if !ok {
-			fmt.Printf("Warning: entry '%s' in libraries table is not a valid TOML table.\n", libKey)
 			continue
 		}
 
 		module, ok := lib.Get("module").(string)
 		if !ok {
-			fmt.Printf("Warning: 'module' not found or not a string for library entry '%s'.\n", libKey)
 			continue
 		}
 
 		versionRef, ok := lib.Get("version.ref").(string)
 		if !ok {
-			fmt.Printf("Warning: 'version.ref' not found for library entry '%s'.\n", libKey)
 			continue
 		}
 
 		version, ok := versions[versionRef]
 		if !ok {
-			fmt.Printf("Warning: version reference '%s' not found in 'versions' table for library '%s'.\n", versionRef, libKey)
 			version = "unknown"
 		}
 
 		parts := strings.Split(module, ":")
 		if len(parts) != 2 {
-			fmt.Printf("Warning: invalid module format for library entry '%s'.\n", libKey)
 			continue
 		}
 		group := parts[0]
@@ -123,7 +116,7 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	versions := make(map[string]string)
 	versionsTree := tree.Get("versions")
 	if versionsTree == nil {
-		return versions, nil // Return empty map if no versions table found
+		return versions, nil
 	}
 
 	versionsMap, ok := versionsTree.(*toml.Tree)
@@ -136,10 +129,6 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 		switch v := value.(type) {
 		case string:
 			versions[key] = v
-		case *toml.Tree:
-			fmt.Printf("Warning: nested tables in 'versions' are not supported. Skipping key '%s'.\n", key)
-		default:
-			fmt.Printf("Warning: unexpected type for version '%s'.\n", key)
 		}
 	}
 
@@ -214,60 +203,16 @@ func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, e
 	return "", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version), nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
 }
 
-// getLicenseInfo fetches the license details for a dependency
-func getLicenseInfo(groupID, artifactID, version string) (string, string, string) {
-	sourceURL, googleSearchURL, pom, err := fetchPOM(groupID, artifactID, version)
-	if err != nil || pom == nil || len(pom.Licenses) == 0 {
-		return "Unknown", googleSearchURL, ""
-	}
-	return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
-}
-
-// splitDependency splits a dependency string into groupID and artifactID
-func splitDependency(dep string) (string, string, error) {
-	parts := strings.Split(dep, "/")
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid dependency format: %s", dep)
-	}
-	return parts[0], parts[1], nil
-}
-
-// LicenseInfo holds the license name, URL, and POM file URL
-type LicenseInfo struct {
-	Name       string
-	URL        string
-	POMFileURL string
-}
-
-// getLicenseInfoWrapper is a wrapper for getLicenseInfo for use in the template
-func getLicenseInfoWrapper(dep, version string) LicenseInfo {
-	groupID, artifactID, err := splitDependency(dep)
-	if err != nil {
-		fmt.Printf("Warning: Invalid dependency format '%s': %v\n", dep, err)
-		return LicenseInfo{"Unknown", "", ""}
-	}
-
-	name, url, pomurl := getLicenseInfo(groupID, artifactID, version)
-	return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
-}
-
-// isCopyleft determines if a license is copyleft based on its name
+// isCopyleft determines if a license is copyleft based on its name or common abbreviations
 func isCopyleft(licenseName string) bool {
 	copyleftKeywords := []string{
-		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
-		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
-		"GNU General Public License",
-		"GNU Lesser General Public License",
-		"Mozilla Public License",
-		"Common Development and Distribution License",
-		"Eclipse Public License",
-		"Common Public License",
-		"European Union Public License",
-		"Open Software License",
+		"GPL", "LGPL", "AGPL", "Affero GPL", "GNU General Public License", "GNU Lesser General Public License",
+		"AGPL", "MPL", "Mozilla Public License", "EPL", "Eclipse Public License", "CPL", "CDDL",
+		"Common Development and Distribution License", "EUPL", "European Union Public License", "CeCILL",
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
-		if strings.Contains(licenseNameUpper, keyword) || strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
+		if strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
 			return true
 		}
 	}
@@ -282,60 +227,54 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-	<html>
-	<head>
-		<title>Dependency License Report</title>
-		<style>
-			body { font-family: Arial, sans-serif; }
-			h1 { color: #2c3e50; }
-			table { width: 100%; border-collapse: collapse; }
-			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-			th { background-color: #f0f0f0; }
-			tr:nth-child(even) { background-color: #f9f9f9; }
-			a { color: #3498db; text-decoration: none; }
-			a:hover { text-decoration: underline; }
-			.copyleft { background-color: #ffdddd; }
-			.non-copyleft { background-color: #ddffdd; }
-			.unknown-license { background-color: #ffffdd; }
-		</style>
-	</head>
-	<body>
-		<h1>Dependency License Report</h1>
-		<table>
-			<thead>
-				<tr>
-					<th>Dependency</th>
-					<th>Version</th>
-					<th>License</th>
-					<th>License Details</th>
-					<th>POM File</th>
-				</tr>
-			</thead>
-			<tbody>
-				{{range $dep, $version := .}}
-				{{ $info := getLicenseInfoWrapper $dep $version }}
-				{{ if eq $info.Name "Unknown" }}
-					<tr class="unknown-license">
-				{{ else if isCopyleft $info.Name }}
-					<tr class="copyleft">
-				{{ else }}
-					<tr class="non-copyleft">
-				{{ end }}
-					<td>{{ $dep }}</td>
-					<td>{{ $version }}</td>
-					<td>{{ $info.Name }}</td>
-					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-				</tr>
-				{{end}}
-			</tbody>
-		</table>
-	</body>
-	</html>`
+<html>
+<head>
+	<title>Dependency License Report</title>
+	<style>
+		body { font-family: Arial, sans-serif; }
+		h1 { color: #2c3e50; }
+		table { width: 100%; border-collapse: collapse; }
+		th, td { padding: 8px; border: 1px solid #ddd; }
+		th { background-color: #f0f0f0; }
+		tr:nth-child(even) { background-color: #f9f9f9; }
+		a { color: #3498db; text-decoration: none; }
+		a:hover { text-decoration: underline; }
+		.copyleft { background-color: #ffdddd; }
+		.non-copyleft { background-color: #ddffdd; }
+		.unknown-license { background-color: #ffffdd; }
+	</style>
+</head>
+<body>
+	<h1>Dependency License Report</h1>
+	<table>
+		<thead>
+			<tr>
+				<th>Dependency</th>
+				<th>Version</th>
+				<th>License</th>
+				<th>License Details</th>
+				<th>POM Source</th>
+			</tr>
+		</thead>
+		<tbody>
+			{{range $dep, $version := .}}
+			{{ $group, $artifact, _ := splitDependency $dep }}
+			{{ $licenseName, $licenseURL, $sourceURL := getLicenseInfo $group $artifact $version }}
+			<tr class="{{if eq $licenseName "Unknown"}}unknown-license{{else if isCopyleft $licenseName}}copyleft{{else}}non-copyleft{{end}}">
+				<td>{{$dep}}</td>
+				<td>{{$version}}</td>
+				<td>{{$licenseName}}</td>
+				<td><a href="{{$licenseURL}}" target="_blank">View Details</a></td>
+				<td><a href="{{$sourceURL}}" target="_blank">View POM</a></td>
+			</tr>
+			{{end}}
+		</tbody>
+	</table>
+</body>
+</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
-		"getLicenseInfoWrapper": getLicenseInfoWrapper,
-		"isCopyleft":            isCopyleft,
+		"isCopyleft": isCopyleft,
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
@@ -357,28 +296,6 @@ func generateHTMLReport(dependencies map[string]string) error {
 	return nil
 }
 
-// captureOutput captures stdout and stderr to a buffer
-func captureOutput(f func()) string {
-	var buf bytes.Buffer
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-	defer func() {
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-	}()
-
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	os.Stderr = w
-
-	f()
-
-	w.Close()
-	buf.ReadFrom(r)
-	return buf.String()
-}
-
-// main is the entry point of the program
 func main() {
 	tomlFilePath, err := findTOMLFile(".")
 	if err != nil {
@@ -386,38 +303,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Found TOML file at: %s\n", tomlFilePath)
-
 	dependencies, err := parseTOMLFile(tomlFilePath)
 	if err != nil {
 		fmt.Printf("Error parsing TOML file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Capture output for debugging
-	output := captureOutput(func() {
-		err = generateHTMLReport(dependencies)
-	})
-
-	// Save output to a text file
-	outputFilePath := filepath.Join(".", "output.txt")
-	err = ioutil.WriteFile(outputFilePath, []byte(output), 0644)
-	if err != nil {
-		fmt.Printf("Error saving output to file: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Output saved to: %s\n", outputFilePath)
-
-	// Print the content of output.txt to the console
-	fmt.Println("Content of output.txt:")
-	content, err := ioutil.ReadFile(outputFilePath)
-	if err != nil {
-		fmt.Printf("Error reading output file: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(string(content))
-
+	err = generateHTMLReport(dependencies)
 	if err != nil {
 		fmt.Printf("Error generating report: %v\n", err)
 		os.Exit(1)
