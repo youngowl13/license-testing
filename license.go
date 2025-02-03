@@ -252,15 +252,13 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 	// Construct a URL to the dependency on Maven Central or Google Maven Repository
 	var detailsURL string
 	if name == "Unknown" {
-		detailsURL = fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version)
+		detailsURL = licenseURL // Use Google Search URL for unknown licenses
 	} else {
 		groupPath := strings.ReplaceAll(groupID, ".", "/")
 		if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
 			detailsURL = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
 		} else if strings.HasPrefix(pomurl, "https://dl.google.com/dl/android/maven2/") {
-			detailsURL = fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", groupID, artifactID, version)
-		} else {
-			detailsURL = "" // Leave empty if not found
+			detailsURL = fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/", groupPath, artifactID, version)
 		}
 	}
 
