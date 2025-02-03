@@ -247,21 +247,24 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 		return LicenseInfo{"Unknown", "", ""}
 	}
 
-	name, url, pomurl := getLicenseInfo(groupID, artifactID, version)
+	name, licenseURL, pomurl := getLicenseInfo(groupID, artifactID, version)
+	var detailsURL string
+
 	if name == "Unknown" {
-		// Use Google search URL for unknown licenses
-		return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
+		detailsURL = licenseURL // Use Google Search URL for unknown licenses
+	} else {
+		// Construct a URL to the dependency on Maven Central or Google Maven Repository
+		groupPath := strings.ReplaceAll(groupID, ".", "/")
+		if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
+			detailsURL = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
+		} else if strings.HasPrefix(pomurl, "https://dl.google.com/dl/android/maven2/") {
+			detailsURL = fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/", groupPath, artifactID, version)
+		} else {
+			detailsURL = "" // Leave empty if not found
+		}
 	}
 
-	// Construct URL to Maven Central or Google's Maven repository
-	var repoURL string
-	if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
-		repoURL = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", strings.ReplaceAll(groupID, ".", "/"), artifactID, version)
-	} else if strings.HasPrefix(pomurl, "https://dl.google.com/dl/android/maven2/") {
-		repoURL = fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/", strings.ReplaceAll(groupID, ".", "/"), artifactID, version)
-	}
-
-	return LicenseInfo{Name: name, URL: repoURL, POMFileURL: pomurl}
+	return LicenseInfo{Name: name, URL: detailsURL, POMFileURL: pomurl}
 }
 
 // isCopyleft determines if a license is copyleft based on its name
