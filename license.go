@@ -234,8 +234,8 @@ func splitDependency(dep string) (string, string, error) {
 
 // LicenseInfo holds the license name, URL, and POM file URL
 type LicenseInfo struct {
-	Name    string
-	URL     string
+	Name       string
+	URL        string
 	POMFileURL string
 }
 
