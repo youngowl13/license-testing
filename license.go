@@ -57,55 +57,58 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 		return nil, fmt.Errorf("error loading TOML file: %v", err)
 	}
 
-	versionsTree := tree.Get("versions")
+	versions, err := loadVersions(tree)
+	if err != nil {
+		return nil, err
+	}
+
 	librariesTree := tree.Get("libraries")
-
-	var versions map[string]interface{}
-	if versionsTree != nil {
-		versions = versionsTree.(*toml.Tree).ToMap()
+	if librariesTree == nil {
+		return nil, fmt.Errorf("TOML file does not contain a 'libraries' table")
 	}
 
-	var libraries map[string]interface{}
-	if librariesTree != nil {
-		libraries = librariesTree.(*toml.Tree).ToMap()
+	libraries, ok := librariesTree.(*toml.Tree)
+	if !ok {
+		return nil, fmt.Errorf("'libraries' is not a valid TOML table")
 	}
 
-	for libKey, libValue := range libraries {
-		libTree, ok := libValue.(*toml.Tree)
+	for _, libKey := range libraries.Keys() {
+		libTree := libraries.Get(libKey)
+		if libTree == nil {
+			fmt.Printf("Warning: entry '%s' not found in libraries table.\n", libKey)
+			continue
+		}
+
+		lib, ok := libTree.(*toml.Tree)
 		if !ok {
 			fmt.Printf("Warning: entry '%s' in libraries table is not a valid TOML table.\n", libKey)
 			continue
 		}
 
-		module, ok := libTree.Get("module").(string)
+		module, ok := lib.Get("module").(string)
 		if !ok {
 			fmt.Printf("Warning: 'module' not found or not a string for library entry '%s'.\n", libKey)
 			continue
 		}
 
-		versionRef, ok := libTree.Get("version.ref").(string)
+		versionRef, ok := lib.Get("version.ref").(string)
 		if !ok {
 			fmt.Printf("Warning: 'version.ref' not found for library entry '%s'.\n", libKey)
 			continue
 		}
 
-		if versions == nil {
-			fmt.Println("Warning: 'versions' table not found.")
-			continue
-		}
-
-		version, ok := versions[versionRef].(string)
+		version, ok := versions[versionRef]
 		if !ok {
 			fmt.Printf("Warning: version reference '%s' not found in 'versions' table.\n", versionRef)
 			continue
 		}
 
-		// Split the module string into group and name
 		parts := strings.Split(module, ":")
 		if len(parts) != 2 {
 			fmt.Printf("Warning: invalid module format for library entry '%s'.\n", libKey)
 			continue
 		}
+
 		group := parts[0]
 		name := parts[1]
 
@@ -114,6 +117,36 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	}
 
 	return dependencies, nil
+}
+
+// loadVersions loads and flattens the versions table into a map
+func loadVersions(tree *toml.Tree) (map[string]string, error) {
+	versions := make(map[string]string)
+	versionsTree := tree.Get("versions")
+	if versionsTree == nil {
+		return versions, nil // Return empty map if no versions table found
+	}
+
+	versionsMap, ok := versionsTree.(*toml.Tree)
+	if !ok {
+		return nil, fmt.Errorf("'versions' is not a valid TOML table")
+	}
+
+	for _, key := range versionsMap.Keys() {
+		value := versionsMap.Get(key)
+		switch v := value.(type) {
+		case string:
+			versions[key] = v
+		case *toml.Tree:
+			// Handle nested tables if necessary
+			// For simplicity, we're not handling nested tables here
+			fmt.Printf("Warning: nested tables in 'versions' are not supported. Skipping key '%s'.\n", key)
+		default:
+			fmt.Printf("Warning: unexpected type for version '%s'.\n", key)
+		}
+	}
+
+	return versions, nil
 }
 
 // fetchPOMFromURL fetches and unmarshals the POM from the given URL
