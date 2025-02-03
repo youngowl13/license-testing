@@ -247,27 +247,8 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 		return LicenseInfo{"Unknown", "", ""}
 	}
 
-	name, licenseURL, pomurl := getLicenseInfo(groupID, artifactID, version)
-	var detailsURL string
-
-	// Construct a URL to the dependency on Maven Central or Google Maven Repository
-	if pomurl != "" {
-		groupPath := strings.ReplaceAll(groupID, ".", "/")
-		if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
-			detailsURL = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
-		} else if strings.HasPrefix(pomurl, "https://dl.google.com/dl/android/maven2/") {
-			detailsURL = fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/", groupPath, artifactID, version)
-		}
-	}
-
-	// Use the actual license URL if available, otherwise fallback to the constructed URL or Google search
-	if licenseURL != "" {
-		detailsURL = licenseURL
-	} else if detailsURL == "" && name == "Unknown" {
-		detailsURL = fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version)
-	}
-
-	return LicenseInfo{Name: name, URL: detailsURL, POMFileURL: pomurl}
+	name, url, pomurl := getLicenseInfo(groupID, artifactID, version)
+	return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
 }
 
 // isCopyleft determines if a license is copyleft based on its name
@@ -431,4 +412,15 @@ func main() {
 
 	// Print the content of output.txt to the console
 	fmt.Println("Content of output.txt:")
-	content, err := ioutil.ReadFile(outputFilePath
+	content, err := ioutil.ReadFile(outputFilePath)
+	if err != nil {
+		fmt.Printf("Error reading output file: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(content))
+
+	if err != nil {
+		fmt.Printf("Error generating report: %v\n", err)
+		os.Exit(1)
+	}
+}
