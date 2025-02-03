@@ -216,16 +216,22 @@ func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, e
 
 // getLicenseInfo fetches the license details for a dependency
 func getLicenseInfo(groupID, artifactID, version string) (string, string, string) {
-	sourceURL, googleSearchURL, pom, err := fetchPOM(groupID, artifactID, version)
-	if err != nil || pom == nil || len(pom.Licenses) == 0 {
-		return "Unknown", googleSearchURL, ""
-	}
-	// Directly return the license URL from the POM if available
-	if len(pom.Licenses) > 0 && pom.Licenses[0].URL != "" {
-		return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
-	}
-	// Fallback to Google search if no valid license URL found
-	return "Unknown", googleSearchURL, sourceURL
+    sourceURL, googleSearchURL, pom, err := fetchPOM(groupID, artifactID, version)
+    if err != nil || pom == nil {
+        // Return "Unknown" for name, Google Search URL for URL, and empty string for POMFileURL on error
+        return "Unknown", googleSearchURL, ""
+    }
+
+    if len(pom.Licenses) > 0 {
+        license := pom.Licenses[0]
+        if license.URL != "" {
+            // Return actual license details if available
+            return license.Name, license.URL, sourceURL
+        }
+    }
+
+    // Return "Unknown" with the Google Search URL as a fallback if no license details are found
+    return "Unknown", googleSearchURL, sourceURL
 }
 
 // splitDependency splits a dependency string into groupID and artifactID
