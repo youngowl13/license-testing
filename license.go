@@ -256,10 +256,18 @@ func isCopyleft(licenseName string) bool {
 	copyleftKeywords := []string{
 		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
 		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
+		"GNU General Public License",
+		"GNU Lesser General Public License",
+		"Mozilla Public License",
+		"Common Development and Distribution License",
+		"Eclipse Public License",
+		"Common Public License",
+		"European Union Public License",
+		"Open Software License",
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
-		if strings.Contains(licenseNameUpper, keyword) {
+		if strings.Contains(licenseNameUpper, keyword) || strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
 			return true
 		}
 	}
@@ -287,8 +295,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 			tr:nth-child(even) { background-color: #f9f9f9; }
 			a { color: #3498db; text-decoration: none; }
 			a:hover { text-decoration: underline; }
-			.copyleft { color: red; }
-			.non-copyleft { color: green; }
+			.copyleft { background-color: #ffdddd; }
 		</style>
 	</head>
 	<body>
@@ -305,11 +312,11 @@ func generateHTMLReport(dependencies map[string]string) error {
 			</thead>
 			<tbody>
 				{{range $dep, $version := .}}
-				<tr>
+				<tr class="{{ if isCopyleft (getLicenseInfoWrapper $dep $version).Name }}copyleft{{ else }}non-copyleft{{ end }}">
 					<td>{{ $dep }}</td>
 					<td>{{ $version }}</td>
 					{{ $info := getLicenseInfoWrapper $dep $version }}
-					<td class="{{ if isCopyleft $info.Name }}copyleft{{ else }}non-copyleft{{ end }}">{{ $info.Name }}</td>
+					<td>{{ $info.Name }}</td>
 					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
 					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
 				</tr>
