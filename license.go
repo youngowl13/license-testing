@@ -220,12 +220,7 @@ func getLicenseInfo(groupID, artifactID, version string) (string, string, string
 	if err != nil || pom == nil || len(pom.Licenses) == 0 {
 		return "Unknown", googleSearchURL, ""
 	}
-	// Directly return the license URL from the POM if available
-	if len(pom.Licenses) > 0 && pom.Licenses[0].URL != "" {
-		return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
-	}
-	// Fallback to Google search if no valid license URL found
-	return "Unknown", googleSearchURL, sourceURL
+	return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
 }
 
 // splitDependency splits a dependency string into groupID and artifactID
@@ -254,11 +249,11 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 
 	name, url, pomurl := getLicenseInfo(groupID, artifactID, version)
 	if name == "Unknown" {
-		// Use the Google search link only when the license is unknown
+		// Use Google search URL for unknown licenses
 		return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
 	}
 
-	// Construct a URL to the dependency on Maven Central or Google Maven Repository
+	// Construct URL to Maven Central or Google's Maven repository
 	var repoURL string
 	if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
 		repoURL = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", strings.ReplaceAll(groupID, ".", "/"), artifactID, version)
@@ -430,4 +425,15 @@ func main() {
 
 	// Print the content of output.txt to the console
 	fmt.Println("Content of output.txt:")
-	content, err := ioutil.ReadFile
+	content, err := ioutil.ReadFile(outputFilePath)
+	if err != nil {
+		fmt.Printf("Error reading output file: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(content))
+
+	if err != nil {
+		fmt.Printf("Error generating report: %v\n", err)
+		os.Exit(1)
+	}
+}
