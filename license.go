@@ -296,6 +296,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 			a { color: #3498db; text-decoration: none; }
 			a:hover { text-decoration: underline; }
 			.copyleft { background-color: #ffdddd; }
+			.non-copyleft { background-color: #ddffdd; }
 		</style>
 	</head>
 	<body>
