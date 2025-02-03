@@ -199,15 +199,14 @@ func splitDependencyWrapper(dep string) string {
 }
 
 // getLicenseInfoWrapper is a wrapper for getLicenseInfo for use in the template.
-func getLicenseInfoWrapper(dep string) string {
+func getLicenseInfoWrapper(dep, version string) (string, string) {
 	parts := strings.Split(dep, "/")
 	if len(parts) != 2 {
-		return "Unknown License"
+		return "Unknown", "URL Not Found"
 	}
 	groupID, artifactID := parts[0], parts[1]
-
-	licenseName, _ := getLicenseInfo(groupID, artifactID, "unknown")
-	return licenseName
+	licenseName, licenseURL := getLicenseInfo(groupID, artifactID, version)
+	return licenseName, licenseURL
 }
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
@@ -218,56 +217,49 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-		<html>
-		<head>
-			<title>Dependency License Report</title>
-			<style>
-				body { font-family: Arial, sans-serif; }
-				h1 { color: #2c3e50; }
-				table { width: 100%; border-collapse: collapse; }
-				th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-				th { background-color: #f0f0f0; }
-				tr:nth-child(even) { background-color: #f9f9f9; }
-				a { color: #3498db; text-decoration: none; }
-				a:hover { text-decoration: underline; }
-			</style>
-		</head>
-		<body>
-			<h1>Dependency License Report</h1>
-			<table>
-				<thead>
-					<tr>
-						<th>Dependency</th>
-						<th>Version</th>
-						<th>License</th>
-						<th>Details</th>
-					</tr>
-				</thead>
-				<tbody>
-					{{range $dep, $version := .}}
-					<tr>
-						<td>{{ splitDependencyWrapper $dep }}</td>
-						<td>{{ $version }}</td>
-						<td>{{ getLicenseInfoWrapper $dep }}</td>
-						<td><a href="{{ getLicenseURL $dep $version }}" target="_blank">View Details</a></td>
-					</tr>
-					{{end}}
-				</tbody>
-			</table>
-		</body>
-		</html>`
+	<html>
+	<head>
+		<title>Dependency License Report</title>
+		<style>
+			body { font-family: Arial, sans-serif; }
+			h1 { color: #2c3e50; }
+			table { width: 100%; border-collapse: collapse; }
+			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
+			th { background-color: #f0f0f0; }
+			tr:nth-child(even) { background-color: #f9f9f9; }
+			a { color: #3498db; text-decoration: none; }
+			a:hover { text-decoration: underline; }
+		</style>
+	</head>
+	<body>
+		<h1>Dependency License Report</h1>
+		<table>
+			<thead>
+				<tr>
+					<th>Dependency</th>
+					<th>Version</th>
+					<th>License</th>
+					<th>Details</th>
+				</tr>
+			</thead>
+			<tbody>
+				{{range $dep, $version := .}}
+				<tr>
+					<td>{{ splitDependencyWrapper $dep }}</td>
+					<td>{{ $version }}</td>
+					{{ $license, $url := getLicenseInfoWrapper $dep $version }}
+					<td>{{ $license }}</td>
+					<td><a href="{{ $url }}" target="_blank">View Details</a></td>
+				</tr>
+				{{end}}
+			</tbody>
+		</table>
+	</body>
+	</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"splitDependencyWrapper": splitDependencyWrapper,
 		"getLicenseInfoWrapper":  getLicenseInfoWrapper,
-		"getLicenseURL": func(dep, version string) string {
-			groupID, artifactID, err := splitDependency(dep)
-			if err != nil {
-				return "#"
-			}
-			_, url := getLicenseInfo(groupID, artifactID, version)
-			return url
-		},
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
