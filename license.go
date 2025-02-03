@@ -57,48 +57,73 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 		return nil, fmt.Errorf("error loading TOML file: %v", err)
 	}
 
-	versionsTree := tree.Get("versions")
+	// Debugging: Print the entire TOML tree
+	fmt.Println("TOML Tree:", tree.String())
+
 	librariesTree := tree.Get("libraries")
-
-	var versions map[string]interface{}
-	if versionsTree != nil {
-		versions = versionsTree.(*toml.Tree).ToMap()
+	if librariesTree == nil {
+		return nil, fmt.Errorf("TOML file does not contain a 'libraries' table")
 	}
 
-	var libraries map[string]interface{}
-	if librariesTree != nil {
-		libraries = librariesTree.(*toml.Tree).ToMap()
+	libraries, ok := librariesTree.(*toml.Tree)
+	if !ok {
+		return nil, fmt.Errorf("'libraries' is not a valid TOML table")
 	}
 
-	for _, value := range libraries {
-		lib := value.(map[string]interface{})
-		group, ok := lib["group"].(string)
-		if !ok {
-			fmt.Println("Warning: 'group' not found for a library entry in TOML file.")
-			continue
-		}
-		name, ok := lib["name"].(string)
-		if !ok {
-			fmt.Println("Warning: 'name' not found for a library entry in TOML file.")
-			continue
-		}
-		versionRef, ok := lib["version.ref"].(string)
-		if !ok {
-			fmt.Println("Warning: 'version.ref' not found for a library entry in TOML file.")
+	// Debugging: Print the libraries table
+	fmt.Println("Libraries Table:", libraries.String())
+
+	for _, libKey := range libraries.Keys() {
+		libTree := libraries.Get(libKey)
+		if libTree == nil {
+			fmt.Printf("Warning: entry '%s' not found in libraries table.\n", libKey)
 			continue
 		}
 
-		if versions == nil {
-			fmt.Println("Warning: 'versions' table not found in TOML file.")
+		lib, ok := libTree.(*toml.Tree)
+		if !ok {
+			fmt.Printf("Warning: entry '%s' in libraries table is not a valid TOML table.\n", libKey)
 			continue
 		}
 
-		version, ok := versions[versionRef].(string)
+		group, ok := lib.Get("group").(string)
 		if !ok {
-			fmt.Println("Warning: version reference not found in 'versions' table.")
+			fmt.Printf("Warning: 'group' not found for library entry '%s'.\n", libKey)
 			continue
 		}
-		dependencies[filepath.Join(group, name)] = version
+
+		name, ok := lib.Get("name").(string)
+		if !ok {
+			fmt.Printf("Warning: 'name' not found for library entry '%s'.\n", libKey)
+			continue
+		}
+
+		versionRef, ok := lib.Get("version.ref").(string)
+		if !ok {
+			fmt.Printf("Warning: 'version.ref' not found for library entry '%s'.\n", libKey)
+			continue
+		}
+
+		versionsTree := tree.Get("versions")
+		if versionsTree == nil {
+			fmt.Printf("Warning: 'versions' table not found.\n")
+			continue
+		}
+
+		versions, ok := versionsTree.(*toml.Tree)
+		if !ok {
+			fmt.Printf("Warning: 'versions' is not a valid TOML table.\n")
+			continue
+		}
+
+		version, ok := versions.Get(versionRef).(string)
+		if !ok {
+			fmt.Printf("Warning: version reference '%s' not found in 'versions' table.\n", versionRef)
+			continue
+		}
+
+		dependencyKey := fmt.Sprintf("%s/%s", group, name)
+		dependencies[dependencyKey] = version
 	}
 
 	return dependencies, nil
@@ -216,45 +241,45 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-	<html>
-	<head>
-		<title>Dependency License Report</title>
-		<style>
-			body { font-family: Arial, sans-serif; }
-			h1 { color: #2c3e50; }
-			table { width: 100%; border-collapse: collapse; }
-			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-			th { background-color: #f0f0f0; }
-			tr:nth-child(even) { background-color: #f9f9f9; }
-			a { color: #3498db; text-decoration: none; }
-			a:hover { text-decoration: underline; }
-		</style>
-	</head>
-	<body>
-		<h1>Dependency License Report</h1>
-		<table>
-			<thead>
-				<tr>
-					<th>Dependency</th>
-					<th>Version</th>
-					<th>License</th>
-					<th>Details</th>
-				</tr>
-			</thead>
-			<tbody>
-				{{range $dep, $version := .}}
-				<tr>
-					<td>{{ $dep }}</td>
-					<td>{{ $version }}</td>
-					{{ $info := getLicenseInfoWrapper $dep $version }}
-					<td>{{ $info.Name }}</td>
-					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-				</tr>
-				{{end}}
-			</tbody>
-		</table>
-	</body>
-	</html>`
+		<html>
+		<head>
+			<title>Dependency License Report</title>
+			<style>
+				body { font-family: Arial, sans-serif; }
+				h1 { color: #2c3e50; }
+				table { width: 100%; border-collapse: collapse; }
+				th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
+				th { background-color: #f0f0f0; }
+				tr:nth-child(even) { background-color: #f9f9f9; }
+				a { color: #3498db; text-decoration: none; }
+				a:hover { text-decoration: underline; }
+			</style>
+		</head>
+		<body>
+			<h1>Dependency License Report</h1>
+			<table>
+				<thead>
+					<tr>
+						<th>Dependency</th>
+						<th>Version</th>
+						<th>License</th>
+						<th>Details</th>
+					</tr>
+				</thead>
+				<tbody>
+					{{range $dep, $version := .}}
+					<tr>
+						<td>{{ $dep }}</td>
+						<td>{{ $version }}</td>
+						{{ $info := getLicenseInfoWrapper $dep $version }}
+						<td>{{ $info.Name }}</td>
+						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+					</tr>
+					{{end}}
+				</tbody>
+			</table>
+		</body>
+		</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
