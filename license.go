@@ -220,14 +220,7 @@ func getLicenseInfo(groupID, artifactID, version string) (string, string, string
 	if err != nil || pom == nil || len(pom.Licenses) == 0 {
 		return "Unknown", googleSearchURL, ""
 	}
-
-	// Handle empty license names
-	licenseName := pom.Licenses[0].Name
-	if licenseName == "" {
-		licenseName = "Unknown"
-	}
-
-	return licenseName, pom.Licenses[0].URL, sourceURL
+	return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
 }
 
 // splitDependency splits a dependency string into groupID and artifactID
