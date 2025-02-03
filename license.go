@@ -57,47 +57,44 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 		return nil, fmt.Errorf("error loading TOML file: %v", err)
 	}
 
-	versions, err := loadVersions(tree)
-	if err != nil {
-		return nil, err
-	}
-
+	versionsTree := tree.Get("versions")
 	librariesTree := tree.Get("libraries")
-	if librariesTree == nil {
-		return nil, fmt.Errorf("TOML file does not contain a 'libraries' table")
+
+	var versions map[string]interface{}
+	if versionsTree != nil {
+		versions = versionsTree.(*toml.Tree).ToMap()
 	}
 
-	libraries, ok := librariesTree.(*toml.Tree)
-	if !ok {
-		return nil, fmt.Errorf("'libraries' is not a valid TOML table")
+	var libraries map[string]interface{}
+	if librariesTree != nil {
+		libraries = librariesTree.(*toml.Tree).ToMap()
 	}
 
-	for _, libKey := range libraries.Keys() {
-		libTree := libraries.Get(libKey)
-		if libTree == nil {
-			fmt.Printf("Warning: entry '%s' not found in libraries table.\n", libKey)
-			continue
-		}
-
-		lib, ok := libTree.(*toml.Tree)
+	for libKey, libValue := range libraries {
+		libTree, ok := libValue.(*toml.Tree)
 		if !ok {
 			fmt.Printf("Warning: entry '%s' in libraries table is not a valid TOML table.\n", libKey)
 			continue
 		}
 
-		module, ok := lib.Get("module").(string)
+		module, ok := libTree.Get("module").(string)
 		if !ok {
 			fmt.Printf("Warning: 'module' not found or not a string for library entry '%s'.\n", libKey)
 			continue
 		}
 
-		versionRef, ok := lib.Get("version.ref").(string)
+		versionRef, ok := libTree.Get("version.ref").(string)
 		if !ok {
 			fmt.Printf("Warning: 'version.ref' not found for library entry '%s'.\n", libKey)
 			continue
 		}
 
-		version, ok := versions[versionRef]
+		if versions == nil {
+			fmt.Println("Warning: 'versions' table not found.")
+			continue
+		}
+
+		version, ok := versions[versionRef].(string)
 		if !ok {
 			fmt.Printf("Warning: version reference '%s' not found in 'versions' table.\n", versionRef)
 			continue
@@ -108,7 +105,6 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 			fmt.Printf("Warning: invalid module format for library entry '%s'.\n", libKey)
 			continue
 		}
-
 		group := parts[0]
 		name := parts[1]
 
@@ -117,36 +113,6 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	}
 
 	return dependencies, nil
-}
-
-// loadVersions loads and flattens the versions table into a map
-func loadVersions(tree *toml.Tree) (map[string]string, error) {
-	versions := make(map[string]string)
-	versionsTree := tree.Get("versions")
-	if versionsTree == nil {
-		return versions, nil // Return empty map if no versions table found
-	}
-
-	versionsMap, ok := versionsTree.(*toml.Tree)
-	if !ok {
-		return nil, fmt.Errorf("'versions' is not a valid TOML table")
-	}
-
-	for _, key := range versionsMap.Keys() {
-		value := versionsMap.Get(key)
-		switch v := value.(type) {
-		case string:
-			versions[key] = v
-		case *toml.Tree:
-			// Handle nested tables if necessary
-			// For simplicity, we're not handling nested tables here
-			fmt.Printf("Warning: nested tables in 'versions' are not supported. Skipping key '%s'.\n", key)
-		default:
-			fmt.Printf("Warning: unexpected type for version '%s'.\n", key)
-		}
-	}
-
-	return versions, nil
 }
 
 // fetchPOMFromURL fetches and unmarshals the POM from the given URL
@@ -176,14 +142,15 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 }
 
 // fetchPOM fetches the POM file concurrently from Maven Central and Google's Android Maven Repository
-func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
+func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, error) {
 	groupPath := strings.ReplaceAll(groupID, ".", "/")
 	mavenURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
 	googleURL := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
 
 	type result struct {
-		pom *MavenPOM
-		err error
+		pom      *MavenPOM
+		sourceURL string
+		err      error
 	}
 	resultCh := make(chan result, 2)
 
@@ -193,13 +160,13 @@ func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
 	go func() {
 		defer wg.Done()
 		pom, err := fetchPOMFromURL(mavenURL)
-		resultCh <- result{pom, err}
+		resultCh <- result{pom, mavenURL, err}
 	}()
 
 	go func() {
 		defer wg.Done()
 		pom, err := fetchPOMFromURL(googleURL)
-		resultCh <- result{pom, err}
+		resultCh <- result{pom, googleURL, err}
 	}()
 
 	go func() {
@@ -209,20 +176,20 @@ func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
 
 	for res := range resultCh {
 		if res.err == nil {
-			return res.pom, nil
+			return res.sourceURL, "", res.pom, nil
 		}
 	}
 
-	return nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
+	return "", "", nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
 }
 
 // getLicenseInfo fetches the license details for a dependency
-func getLicenseInfo(groupID, artifactID, version string) (string, string) {
-	pom, err := fetchPOM(groupID, artifactID, version)
+func getLicenseInfo(groupID, artifactID, version string) (string, string, string) {
+	sourceURL, googleSearchURL, pom, err := fetchPOM(groupID, artifactID, version)
 	if err != nil || pom == nil || len(pom.Licenses) == 0 {
-		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version)
+		return "Unknown", googleSearchURL, ""
 	}
-	return pom.Licenses[0].Name, pom.Licenses[0].URL
+	return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
 }
 
 // splitDependency splits a dependency string into groupID and artifactID
@@ -234,10 +201,11 @@ func splitDependency(dep string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-// LicenseInfo holds the license name and URL
+// LicenseInfo holds the license name, URL, and POM file URL
 type LicenseInfo struct {
-	Name string
-	URL  string
+	Name    string
+	URL     string
+	POMFileURL string
 }
 
 // getLicenseInfoWrapper is a wrapper for getLicenseInfo for use in the template
@@ -245,11 +213,11 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 	groupID, artifactID, err := splitDependency(dep)
 	if err != nil {
 		fmt.Printf("Warning: Invalid dependency format '%s': %v\n", dep, err)
-		return LicenseInfo{"Unknown", ""}
+		return LicenseInfo{"Unknown", "", ""}
 	}
 
-	name, url := getLicenseInfo(groupID, artifactID, version)
-	return LicenseInfo{Name: name, URL: url}
+	name, url, pomURL := getLicenseInfo(groupID, artifactID, version)
+	return LicenseInfo{Name: name, URL: url, POMFileURL: pomURL}
 }
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
@@ -283,7 +251,8 @@ func generateHTMLReport(dependencies map[string]string) error {
 					<th>Dependency</th>
 					<th>Version</th>
 					<th>License</th>
-					<th>Details</th>
+					<th>License Details</th>
+					<th>POM File</th>
 				</tr>
 			</thead>
 			<tbody>
@@ -294,6 +263,11 @@ func generateHTMLReport(dependencies map[string]string) error {
 					{{ $info := getLicenseInfoWrapper $dep $version }}
 					<td>{{ $info.Name }}</td>
 					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+					{{ if ne $info.POMFileURL "" }}
+						<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+					{{ else }}
+						<td>POM Not Found</td>
+					{{ end }}
 				</tr>
 				{{end}}
 			</tbody>
