@@ -295,9 +295,9 @@ func generateHTMLReport(dependencies map[string]string) error {
         tr:nth-child(even) { background-color: #f9f9f9; }
         a { color: #3498db; text-decoration: none; }
         a:hover { text-decoration: underline; }
-        .copyleft { background-color: #ffdddd; }
-        .non-copyleft { background-color: #ddffdd; }
-        .unknown-license { background-color: #ffffdd; }
+        tr.copyleft { background-color: #ffdddd; }
+        tr.non-copyleft { background-color: #ddffdd; }
+        tr.unknown-license { background-color: #ffffdd; }
     </style>
 </head>
 <body>
