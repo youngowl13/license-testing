@@ -220,7 +220,12 @@ func getLicenseInfo(groupID, artifactID, version string) (string, string, string
 	if err != nil || pom == nil || len(pom.Licenses) == 0 {
 		return "Unknown", googleSearchURL, ""
 	}
-	return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
+	// Directly return the license URL from the POM if available
+	if len(pom.Licenses) > 0 && pom.Licenses[0].URL != "" {
+		return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
+	}
+	// Fallback to Google search if no valid license URL found
+	return "Unknown", googleSearchURL, sourceURL
 }
 
 // splitDependency splits a dependency string into groupID and artifactID
@@ -248,18 +253,6 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 	}
 
 	name, url, pomurl := getLicenseInfo(groupID, artifactID, version)
-	if url == "" && name != "Unknown" {
-		// If the license URL is not found in the POM, but we have a license name,
-		// construct a URL based on the repository where the POM was found.
-		if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
-			url = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/LICENSE",
-				strings.ReplaceAll(groupID, ".", "/"), artifactID, version)
-		} else if strings.HasPrefix(pomurl, "https://dl.google.com/dl/android/maven2/") {
-			url = fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/LICENSE",
-				strings.ReplaceAll(groupID, ".", "/"), artifactID, version)
-		}
-	}
-
 	return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
 }
 
@@ -288,7 +281,6 @@ func isCopyleft(licenseName string) bool {
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
 func generateHTMLReport(dependencies map[string]string) error {
-	fmt.Println("Dependencies:", dependencies)
 	outputDir := "./license-checker"
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
 		os.Mkdir(outputDir, 0755)
