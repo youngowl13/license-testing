@@ -362,30 +362,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Capture output for debugging
-	output := captureOutput(func() {
-		err = generateHTMLReport(dependencies)
-	})
-
-	// Save output to a text file
-	outputFilePath := filepath.Join(".", "output.txt")
-	err = ioutil.WriteFile(outputFilePath, []byte(output), 0644)
-	if err != nil {
-		fmt.Printf("Error saving output to file: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Output saved to: %s\n", outputFilePath)
-
-	// Print the content of output.txt to the console
-	fmt.Println("Content of output.txt:")
-	content, err := ioutil.ReadFile(outputFilePath)
-	if err != nil {
-		fmt.Printf("Error reading output file: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(string(content))
-
+	err = generateHTMLReport(dependencies)
 	if err != nil {
 		fmt.Printf("Error generating report: %v\n", err)
 		os.Exit(1)
