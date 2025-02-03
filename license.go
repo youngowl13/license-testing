@@ -247,24 +247,8 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 		return LicenseInfo{"Unknown", "", ""}
 	}
 
-	name, licenseURL, pomurl := getLicenseInfo(groupID, artifactID, version)
-	var detailsURL string
-
-	if name == "Unknown" {
-		detailsURL = licenseURL // Use Google Search URL for unknown licenses
-	} else {
-		// Construct a URL to the dependency on Maven Central or Google Maven Repository
-		groupPath := strings.ReplaceAll(groupID, ".", "/")
-		if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
-			detailsURL = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
-		} else if strings.HasPrefix(pomurl, "https://dl.google.com/dl/android/maven2/") {
-			detailsURL = fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/", groupPath, artifactID, version)
-		} else {
-			detailsURL = "" // Leave empty if not found
-		}
-	}
-
-	return LicenseInfo{Name: name, URL: detailsURL, POMFileURL: pomurl}
+	name, url, pomurl := getLicenseInfo(groupID, artifactID, version)
+	return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
 }
 
 // isCopyleft determines if a license is copyleft based on its name
@@ -283,7 +267,7 @@ func isCopyleft(licenseName string) bool {
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
-		if strings.Contains(licenseNameUpper, keyword) {
+		if strings.Contains(licenseNameUpper, keyword) || strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
 			return true
 		}
 	}
@@ -299,56 +283,56 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-	<html>
-	<head>
-		<title>Dependency License Report</title>
-		<style>
-			body { font-family: Arial, sans-serif; }
-			h1 { color: #2c3e50; }
-			table { width: 100%; border-collapse: collapse; }
-			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-			th { background-color: #f0f0f0; }
-			tr:nth-child(even) { background-color: #f9f9f9; }
-			a { color: #3498db; text-decoration: none; }
-			a:hover { text-decoration: underline; }
-			.copyleft { background-color: #ffdddd; }
-			.non-copyleft { background-color: #ddffdd; }
-			.unknown-license { background-color: #ffffdd; }
-		</style>
-	</head>
-	<body>
-		<h1>Dependency License Report</h1>
-		<table>
-			<thead>
-				<tr>
-					<th>Dependency</th>
-					<th>Version</th>
-					<th>License</th>
-					<th>License Details</th>
-					<th>POM File</th>
-				</tr>
-			</thead>
-			<tbody>
-				{{range $dep, $version := .}}
-				{{ $info := getLicenseInfoWrapper $dep $version }}
-				{{ if eq $info.Name "Unknown" }}
-					<tr class="unknown-license">
-				{{ else if isCopyleft $info.Name }}
-					<tr class="copyleft">
-				{{ else }}
-					<tr class="non-copyleft">
-				{{ end }}
-					<td>{{ $dep }}</td>
-					<td>{{ $version }}</td>
-					<td>{{ $info.Name }}</td>
-					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-				</tr>
-				{{end}}
-			</tbody>
-		</table>
-	</body>
-	</html>`
+<html>
+<head>
+    <title>Dependency License Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        h1 { color: #2c3e50; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
+        th { background-color: #f0f0f0; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        a { color: #3498db; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .copyleft { background-color: #ffdddd; }
+        .non-copyleft { background-color: #ddffdd; }
+        .unknown-license { background-color: #ffffdd; }
+    </style>
+</head>
+<body>
+    <h1>Dependency License Report</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Dependency</th>
+                <th>Version</th>
+                <th>License</th>
+                <th>License Details</th>
+                <th>POM File</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $dep, $version := .}}
+            {{ $info := getLicenseInfoWrapper $dep $version }}
+            {{ if eq $info.Name "Unknown" }}
+                <tr class="unknown-license">
+            {{ else if isCopyleft $info.Name }}
+                <tr class="copyleft">
+            {{ else }}
+                <tr class="non-copyleft">
+            {{ end }}
+                <td>{{ $dep }}</td>
+                <td>{{ $version }}</td>
+                <td>{{ $info.Name }}</td>
+                <td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+                <td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
