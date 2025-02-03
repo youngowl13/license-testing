@@ -315,13 +315,31 @@ func generateHTMLReport(dependencies map[string]string) error {
 			<tbody>
 				{{range $dep, $version := .}}
 				{{ $info := getLicenseInfoWrapper $dep $version }}
-				<tr class="{{ if eq $info.Name "Unknown" }}unknown-license{{ else if isCopyleft $info.Name }}copyleft{{ else }}non-copyleft{{ end }}">
-					<td>{{ $dep }}</td>
-					<td>{{ $version }}</td>
-					<td>{{ $info.Name }}</td>
-					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-				</tr>
+				{{ if eq $info.Name "Unknown" }}
+					<tr class="unknown-license">
+						<td>{{ $dep }}</td>
+						<td>{{ $version }}</td>
+						<td>{{ $info.Name }}</td>
+						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+						<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+					</tr>
+				{{ else if isCopyleft $info.Name }}
+					<tr class="copyleft">
+						<td>{{ $dep }}</td>
+						<td>{{ $version }}</td>
+						<td>{{ $info.Name }}</td>
+						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+						<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+					</tr>
+				{{ else }}
+					<tr class="non-copyleft">
+						<td>{{ $dep }}</td>
+						<td>{{ $version }}</td>
+						<td>{{ $info.Name }}</td>
+						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+						<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+					</tr>
+				{{ end }}
 				{{end}}
 			</tbody>
 		</table>
