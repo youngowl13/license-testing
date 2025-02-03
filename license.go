@@ -267,7 +267,7 @@ func isCopyleft(licenseName string) bool {
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
-		if strings.Contains(licenseNameUpper, keyword) || strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
+		if strings.Contains(licenseNameUpper, keyword) {
 			return true
 		}
 	}
@@ -317,29 +317,21 @@ func generateHTMLReport(dependencies map[string]string) error {
 				{{ $info := getLicenseInfoWrapper $dep $version }}
 				{{ if eq $info.Name "Unknown" }}
 					<tr class="unknown-license">
-						<td>{{ $dep }}</td>
-						<td>{{ $version }}</td>
-						<td>{{ $info.Name }}</td>
-						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-						<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-					</tr>
 				{{ else if isCopyleft $info.Name }}
 					<tr class="copyleft">
-						<td>{{ $dep }}</td>
-						<td>{{ $version }}</td>
-						<td>{{ $info.Name }}</td>
-						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-						<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-					</tr>
 				{{ else }}
 					<tr class="non-copyleft">
-						<td>{{ $dep }}</td>
-						<td>{{ $version }}</td>
-						<td>{{ $info.Name }}</td>
-						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-						<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-					</tr>
 				{{ end }}
+					<td>{{ $dep }}</td>
+					<td>{{ $version }}</td>
+					<td>{{ $info.Name }}</td>
+					{{ if eq $info.URL "" }}
+						<td><a href="{{ getGoogleSearchLink $dep $version }}" target="_blank">Search License</a></td>
+					{{ else }}
+						<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+					{{ end }}
+					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+				</tr>
 				{{end}}
 			</tbody>
 		</table>
@@ -349,6 +341,9 @@ func generateHTMLReport(dependencies map[string]string) error {
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
 		"isCopyleft":            isCopyleft,
+		"getGoogleSearchLink": func(dep, version string) string {
+			return fmt.Sprintf("https://www.google.com/search?q=%s+%s+license", dep, version)
+		},
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
