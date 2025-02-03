@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html/template"
-	"io/fs"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -26,18 +25,18 @@ type MavenPOM struct {
 
 func findTOMLFile(root string) (string, error) {
 	var tomlFile string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), ".toml") {
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".toml") {
 			tomlFile = path
-			return filepath.SkipAll
+			return filepath.SkipDir
 		}
 		return nil
 	})
 	if tomlFile == "" {
-		return "", fmt.Errorf("no .toml file found")
+		return "", fmt.Errorf("no .toml file found in the directory tree")
 	}
 	return tomlFile, nil
 }
@@ -53,11 +52,11 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	librariesTree := tree.Get("libraries")
 
 	var versions map[string]interface{}
+	var libraries map[string]interface{}
+
 	if versionsTree != nil {
 		versions = versionsTree.(*toml.Tree).ToMap()
 	}
-
-	var libraries map[string]interface{}
 	if librariesTree != nil {
 		libraries = librariesTree.(*toml.Tree).ToMap()
 	}
@@ -68,7 +67,7 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 		name, _ := lib["name"].(string)
 		versionRef, _ := lib["version.ref"].(string)
 		version, _ := versions[versionRef].(string)
-		dependencies[filepath.Join(group, name)] = version
+		dependencies[fmt.Sprintf("%s:%s", group, name)] = version
 	}
 
 	return dependencies, nil
@@ -76,8 +75,7 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 
 func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
 	groupPath := strings.ReplaceAll(groupID, ".", "/")
-	pomURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom",
-		groupPath, artifactID, version, artifactID, version)
+	pomURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
 
 	resp, err := http.Get(pomURL)
 	if err != nil {
@@ -95,30 +93,18 @@ func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
 	return &pom, err
 }
 
-func getLicenseInfo(groupID, artifactID, version string) (string, string) {
+func getLicenseInfo(dependency, version string) (string, string) {
+	parts := strings.Split(dependency, ":")
+	if len(parts) != 2 {
+		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+license", dependency, version)
+	}
+
+	groupID, artifactID := parts[0], parts[1]
 	pom, err := fetchPOM(groupID, artifactID, version)
 	if err != nil || len(pom.Licenses) == 0 {
-		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license",
-			groupID, artifactID, version)
+		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+license", dependency, version)
 	}
 	return pom.Licenses[0].Name, pom.Licenses[0].URL
-}
-
-func splitDependency(depName string) (string, string) {
-	knownFormats := map[string]string{
-		"agp":               "com.android.tools.build:gradle",
-		"androidx-core-ktx": "androidx.core:core-ktx",
-		"appcompat":         "androidx.appcompat:appcompat",
-		"material":          "com.google.android.material:material",
-	}
-
-	if groupArtifact, ok := knownFormats[depName]; ok {
-		parts := strings.Split(groupArtifact, ":")
-		if len(parts) == 2 {
-			return parts[0], parts[1]
-		}
-	}
-	return "Unknown", depName
 }
 
 func generateHTMLReport(dependencies map[string]string) error {
@@ -158,8 +144,7 @@ func generateHTMLReport(dependencies map[string]string) error {
             <tr>
                 <td>{{$dep}}</td>
                 <td>{{$version}}</td>
-                {{ $group, $artifact := splitDependency $dep }}
-                {{ $license, $url := getLicenseInfo $group $artifact $version }}
+                {{ $license, $url := getLicenseInfo $dep $version }}
                 <td>{{$license}}</td>
                 <td><a href="{{$url}}" target="_blank">View Details</a></td>
             </tr>
@@ -170,8 +155,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 </html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
-		"splitDependency": splitDependency,
-		"getLicenseInfo":  getLicenseInfo,
+		"getLicenseInfo": getLicenseInfo,
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
@@ -194,13 +178,13 @@ func generateHTMLReport(dependencies map[string]string) error {
 }
 
 func main() {
-	tomlFilePath, err := findTOMLFile(".")
+	tomlFile, err := findTOMLFile(".")
 	if err != nil {
 		fmt.Printf("Error finding TOML file: %v\n", err)
 		os.Exit(1)
 	}
 
-	dependencies, err := parseTOMLFile(tomlFilePath)
+	dependencies, err := parseTOMLFile(tomlFile)
 	if err != nil {
 		fmt.Printf("Error parsing TOML file: %v\n", err)
 		os.Exit(1)
