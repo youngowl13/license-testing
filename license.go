@@ -123,7 +123,7 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	versions := make(map[string]string)
 	versionsTree := tree.Get("versions")
 	if versionsTree == nil {
-		return versions, nil // Return empty map if no versions table found
+		return versions, nil
 	}
 
 	versionsMap, ok := versionsTree.(*toml.Tree)
@@ -253,6 +253,7 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
 func generateHTMLReport(dependencies map[string]string) error {
+	fmt.Println("Dependencies:", dependencies)
 	outputDir := "./license-checker"
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
 		os.Mkdir(outputDir, 0755)
@@ -361,30 +362,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Capture output for debugging
-	output := captureOutput(func() {
-		err = generateHTMLReport(dependencies)
-	})
-
-	// Save output to a text file
-	outputFilePath := filepath.Join(".", "output.txt")
-	err = ioutil.WriteFile(outputFilePath, []byte(output), 0644)
-	if err != nil {
-		fmt.Printf("Error saving output to file: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Output saved to: %s\n", outputFilePath)
-
-	// Print the content of output.txt to the console
-	fmt.Println("Content of output.txt:")
-	content, err := ioutil.ReadFile(outputFilePath)
-	if err != nil {
-		fmt.Printf("Error reading output file: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(string(content))
-
+	err = generateHTMLReport(dependencies)
 	if err != nil {
 		fmt.Printf("Error generating report: %v\n", err)
 		os.Exit(1)
