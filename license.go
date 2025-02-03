@@ -255,7 +255,7 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 func isCopyleft(licenseName string) bool {
 	copyleftKeywords := []string{
 		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
-		"CDDL", "EUPL", "Affero", "OSL",
+		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
@@ -268,6 +268,7 @@ func isCopyleft(licenseName string) bool {
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
 func generateHTMLReport(dependencies map[string]string) error {
+	fmt.Println("Dependencies:", dependencies)
 	outputDir := "./license-checker"
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
 		os.Mkdir(outputDir, 0755)
