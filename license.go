@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"html/template"
@@ -214,45 +215,45 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-<html>
-<head>
-    <title>Dependency License Report</title>
-    <style>
-        body { font-family: Arial, sans-serif; }
-        h1 { color: #2c3e50; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-        th { background-color: #f0f0f0; }
-        tr:nth-child(even) { background-color: #f9f9f9; }
-        a { color: #3498db; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <h1>Dependency License Report</h1>
-    <table>
-        <thead>
-            <tr>
-                <th>Dependency</th>
-                <th>Version</th>
-                <th>License</th>
-                <th>Details</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range $dep, $version := .}}
-            <tr>
-                <td>{{ $dep }}</td>
-                <td>{{ $version }}</td>
-                {{ $info := getLicenseInfoWrapper $dep $version }}
-                <td>{{ $info.Name }}</td>
-                <td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-            </tr>
-            {{end}}
-        </tbody>
-    </table>
-</body>
-</html>`
+	<html>
+	<head>
+		<title>Dependency License Report</title>
+		<style>
+			body { font-family: Arial, sans-serif; }
+			h1 { color: #2c3e50; }
+			table { width: 100%; border-collapse: collapse; }
+			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
+			th { background-color: #f0f0f0; }
+			tr:nth-child(even) { background-color: #f9f9f9; }
+			a { color: #3498db; text-decoration: none; }
+			a:hover { text-decoration: underline; }
+		</style>
+	</head>
+	<body>
+		<h1>Dependency License Report</h1>
+		<table>
+			<thead>
+				<tr>
+					<th>Dependency</th>
+					<th>Version</th>
+					<th>License</th>
+					<th>Details</th>
+				</tr>
+			</thead>
+			<tbody>
+				{{range $dep, $version := .}}
+				<tr>
+					<td>{{ $dep }}</td>
+					<td>{{ $version }}</td>
+					{{ $info := getLicenseInfoWrapper $dep $version }}
+					<td>{{ $info.Name }}</td>
+					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+				</tr>
+				{{end}}
+			</tbody>
+		</table>
+	</body>
+	</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
@@ -277,6 +278,27 @@ func generateHTMLReport(dependencies map[string]string) error {
 	return nil
 }
 
+// captureOutput captures stdout and stderr to a buffer
+func captureOutput(f func()) string {
+	var buf bytes.Buffer
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	defer func() {
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+	}()
+
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	os.Stderr = w
+
+	f()
+
+	w.Close()
+	buf.ReadFrom(r)
+	return buf.String()
+}
+
 // main is the entry point of the program
 func main() {
 	tomlFilePath, err := findTOMLFile(".")
@@ -293,7 +315,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = generateHTMLReport(dependencies)
+	// Capture output for debugging
+	output := captureOutput(func() {
+		err = generateHTMLReport(dependencies)
+	})
+
+	// Save output to a text file
+	outputFilePath := filepath.Join(".", "output.txt")
+	err = ioutil.WriteFile(outputFilePath, []byte(output), 0644)
+	if err != nil {
+		fmt.Printf("Error saving output to file: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Output saved to: %s\n", outputFilePath)
+
 	if err != nil {
 		fmt.Printf("Error generating report: %v\n", err)
 		os.Exit(1)
