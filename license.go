@@ -283,53 +283,49 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-	<html>
-	<head>
-		<title>Dependency License Report</title>
-		<style>
-			body { font-family: Arial, sans-serif; }
-			h1 { color: #2c3e50; }
-			table { width: 100%; border-collapse: collapse; }
-			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-			th { background-color: #f0f0f0; }
-			tr:nth-child(even) { background-color: #f9f9f9; }
-			a { color: #3498db; text-decoration: none; }
-			a:hover { text-decoration: underline; }
-			.copyleft { background-color: #ffdddd; }
-			.non-copyleft { background-color: #ddffdd; }
-		</style>
-	</head>
-	<body>
-		<h1>Dependency License Report</h1>
-		<table>
-			<thead>
-				<tr>
-					<th>Dependency</th>
-					<th>Version</th>
-					<th>License</th>
-					<th>License Details</th>
-					<th>POM File</th>
-				</tr>
-			</thead>
-			<tbody>
-				{{range $dep, $version := .}}
-				{{ $info := getLicenseInfoWrapper $dep $version }}
-				{{ if isCopyleft $info.Name }}
-				<tr class="copyleft">
-				{{ else }}
-				<tr class="non-copyleft">
-				{{ end }}
-					<td>{{ $dep }}</td>
-					<td>{{ $version }}</td>
-					<td>{{ $info.Name }}</td>
-					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-				</tr>
-				{{end}}
-			</tbody>
-		</table>
-	</body>
-	</html>`
+<html>
+<head>
+    <title>Dependency License Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        h1 { color: #2c3e50; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
+        th { background-color: #f0f0f0; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        a { color: #3498db; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .copyleft { background-color: #ffdddd; }
+        .non-copyleft { background-color: #ddffdd; }
+    </style>
+</head>
+<body>
+    <h1>Dependency License Report</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Dependency</th>
+                <th>Version</th>
+                <th>License</th>
+                <th>License Details</th>
+                <th>POM File</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $dep, $version := .}}
+            {{ $info := getLicenseInfoWrapper $dep $version }}
+            <tr class="{{ if isCopyleft $info.Name }}copyleft{{ else }}non-copyleft{{ end }}">
+                <td>{{ $dep }}</td>
+                <td>{{ $version }}</td>
+                <td>{{ $info.Name }}</td>
+                <td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+                <td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
