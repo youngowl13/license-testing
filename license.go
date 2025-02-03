@@ -71,29 +71,28 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 		group, ok := lib["group"].(string)
 		if !ok {
 			fmt.Println("Warning: 'group' not found for a library entry in TOML file.")
-			continue // Skip this entry and proceed with the next one
+			continue
 		}
 		name, ok := lib["name"].(string)
 		if !ok {
 			fmt.Println("Warning: 'name' not found for a library entry in TOML file.")
-			continue // Skip this entry and proceed with the next one
+			continue
 		}
 		versionRef, ok := lib["version.ref"].(string)
 		if !ok {
 			fmt.Println("Warning: 'version.ref' not found for a library entry in TOML file.")
-			continue // Skip this entry and proceed with the next one
+			continue
 		}
 
-		// Accessing versions map safely
 		if versions == nil {
 			fmt.Println("Warning: 'versions' table not found in TOML file.")
-			continue // Skip this entry and proceed with the next one
+			continue
 		}
 
 		version, ok := versions[versionRef].(string)
 		if !ok {
 			fmt.Println("Warning: version reference not found in 'versions' table.")
-			continue // Skip this entry and proceed with the next one
+			continue
 		}
 		dependencies[filepath.Join(group, name)] = version
 	}
@@ -137,35 +136,31 @@ func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
 		pom *MavenPOM
 		err error
 	}
-	resultCh := make(chan result, 2) // Buffered channel to hold up to 2 results
+	resultCh := make(chan result, 2)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Fetch from Maven Central
 	go func() {
 		defer wg.Done()
 		pom, err := fetchPOMFromURL(mavenURL)
 		resultCh <- result{pom, err}
 	}()
 
-	// Fetch from Google's Android Maven Repository
 	go func() {
 		defer wg.Done()
 		pom, err := fetchPOMFromURL(googleURL)
 		resultCh <- result{pom, err}
 	}()
 
-	// Wait for both fetches to complete
 	go func() {
 		wg.Wait()
-		close(resultCh) // Close the channel after both fetches are done
+		close(resultCh)
 	}()
 
-	// Process results
 	for res := range resultCh {
 		if res.err == nil {
-			return res.pom, nil // Return the first successful result
+			return res.pom, nil
 		}
 	}
 
@@ -181,7 +176,7 @@ func getLicenseInfo(groupID, artifactID, version string) (string, string) {
 	return pom.Licenses[0].Name, pom.Licenses[0].URL
 }
 
-// splitDependency is the original function to split a dependency string
+// splitDependency splits a dependency string into groupID and artifactID
 func splitDependency(dep string) (string, string, error) {
 	parts := strings.Split(dep, "/")
 	if len(parts) != 2 {
@@ -190,14 +185,14 @@ func splitDependency(dep string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-// splitDependencyWrapper is the wrapper function for use in the template
-func splitDependencyWrapper(dep string) (string, string) {
+// Returns a combined string of groupID and artifactID.
+func splitDependencyWrapper(dep string) string {
 	groupID, artifactID, err := splitDependency(dep)
 	if err != nil {
 		fmt.Printf("Warning: Error splitting dependency '%s': %v\n", dep, err)
-		return "", "" // Or return some default/error values
+		return "" // Return empty string on error
 	}
-	return groupID, artifactID
+	return groupID + "/" + artifactID
 }
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
@@ -208,46 +203,50 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-    <html>
-    <head>
-        <title>Dependency License Report</title>
-        <style>
-            body { font-family: Arial, sans-serif; }
-            h1 { color: #2c3e50; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-            th { background-color: #f0f0f0; }
-            tr:nth-child(even) { background-color: #f9f9f9; }
-            a { color: #3498db; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-        </style>
-    </head>
-    <body>
-        <h1>Dependency License Report</h1>
-        <table>
-            <thead>
-                <tr>
-                    <th>Dependency</th>
-                    <th>Version</th>
-                    <th>License</th>
-                    <th>Details</th>
-                </tr>
-            </thead>
-            <tbody>
-                {{range $dep, $version := .}}
-                <tr>
-                    <td>{{$dep}}</td>
-                    <td>{{$version}}</td>
-                    {{ $groupID, $artifactID := splitDependencyWrapper $dep }}
-                    {{ $license, $url := getLicenseInfo $groupID $artifactID $version }}
-                    <td>{{$license}}</td>
-                    <td><a href="{{$url}}" target="_blank">View Details</a></td>
-                </tr>
-                {{end}}
-            </tbody>
-        </table>
-    </body>
-    </html>`
+	<html>
+	<head>
+		<title>Dependency License Report</title>
+		<style>
+			body { font-family: Arial, sans-serif; }
+			h1 { color: #2c3e50; }
+			table { width: 100%; border-collapse: collapse; }
+			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
+			th { background-color: #f0f0f0; }
+			tr:nth-child(even) { background-color: #f9f9f9; }
+			a { color: #3498db; text-decoration: none; }
+			a:hover { text-decoration: underline; }
+		</style>
+	</head>
+	<body>
+		<h1>Dependency License Report</h1>
+		<table>
+			<thead>
+				<tr>
+					<th>Dependency</th>
+					<th>Version</th>
+					<th>License</th>
+					<th>Details</th>
+				</tr>
+			</thead>
+			<tbody>
+				{{range $dep, $version := .}}
+				<tr>
+					<td>{{ splitDependencyWrapper $dep }}</td>
+					<td>{{ $version }}</td>
+					{{ $groupID, $artifactID, $err := splitDependency $dep }}
+					{{ if $err }}
+						<td colspan="2">Error: {{ $err }}</td>
+					{{ else }}
+						{{ $license, $url := getLicenseInfo $groupID $artifactID $version }}
+						<td>{{ $license }}</td>
+						<td><a href="{{ $url }}" target="_blank">View Details</a></td>
+					{{ end }}
+				</tr>
+				{{end}}
+			</tbody>
+		</table>
+	</body>
+	</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"splitDependencyWrapper": splitDependencyWrapper,
@@ -280,6 +279,8 @@ func main() {
 		fmt.Printf("Error finding TOML file: %v\n", err)
 		os.Exit(1)
 	}
+
+	fmt.Printf("Found TOML file at: %s\n", tomlFilePath)
 
 	dependencies, err := parseTOMLFile(tomlFilePath)
 	if err != nil {
