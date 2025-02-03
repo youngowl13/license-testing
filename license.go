@@ -315,13 +315,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 			<tbody>
 				{{range $dep, $version := .}}
 				{{ $info := getLicenseInfoWrapper $dep $version }}
-				{{ if eq $info.Name "Unknown" }}
-					<tr class="unknown-license">
-				{{ else if isCopyleft $info.Name }}
-					<tr class="copyleft">
-				{{ else }}
-					<tr class="non-copyleft">
-				{{ end }}
+				<tr class="{{ if eq $info.Name "Unknown" }}unknown-license{{ else if isCopyleft $info.Name }}copyleft{{ else }}non-copyleft{{ end }}">
 					<td>{{ $dep }}</td>
 					<td>{{ $version }}</td>
 					<td>{{ $info.Name }}</td>
