@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/pelletier/go-toml"
 )
@@ -100,27 +101,6 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	return dependencies, nil
 }
 
-// fetchPOM fetches the POM file from Maven Central or Google's Android Maven Repository
-func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
-	groupPath := strings.ReplaceAll(groupID, ".", "/")
-	mavenURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
-	googleURL := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
-
-	// Try Maven Central first
-	pom, err := fetchPOMFromURL(mavenURL)
-	if err == nil {
-		return pom, nil
-	}
-
-	// Then try Google's Android Maven Repository
-	pom, err = fetchPOMFromURL(googleURL)
-	if err == nil {
-		return pom, nil
-	}
-
-	return nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
-}
-
 // fetchPOMFromURL fetches and unmarshals the POM from the given URL
 func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	resp, err := http.Get(url)
@@ -147,6 +127,51 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	return &pom, nil
 }
 
+// fetchPOM fetches the POM file concurrently from Maven Central and Google's Android Maven Repository
+func fetchPOM(groupID, artifactID, version string) (*MavenPOM, error) {
+	groupPath := strings.ReplaceAll(groupID, ".", "/")
+	mavenURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
+	googleURL := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
+
+	type result struct {
+		pom *MavenPOM
+		err error
+	}
+	resultCh := make(chan result, 2) // Buffered channel to hold up to 2 results
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Fetch from Maven Central
+	go func() {
+		defer wg.Done()
+		pom, err := fetchPOMFromURL(mavenURL)
+		resultCh <- result{pom, err}
+	}()
+
+	// Fetch from Google's Android Maven Repository
+	go func() {
+		defer wg.Done()
+		pom, err := fetchPOMFromURL(googleURL)
+		resultCh <- result{pom, err}
+	}()
+
+	// Wait for both fetches to complete
+	go func() {
+		wg.Wait()
+		close(resultCh) // Close the channel after both fetches are done
+	}()
+
+	// Process results
+	for res := range resultCh {
+		if res.err == nil {
+			return res.pom, nil // Return the first successful result
+		}
+	}
+
+	return nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
+}
+
 // getLicenseInfo fetches the license details for a dependency
 func getLicenseInfo(groupID, artifactID, version string) (string, string) {
 	pom, err := fetchPOM(groupID, artifactID, version)
@@ -154,6 +179,25 @@ func getLicenseInfo(groupID, artifactID, version string) (string, string) {
 		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version)
 	}
 	return pom.Licenses[0].Name, pom.Licenses[0].URL
+}
+
+// splitDependency is the original function to split a dependency string
+func splitDependency(dep string) (string, string, error) {
+	parts := strings.Split(dep, "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid dependency format: %s", dep)
+	}
+	return parts[0], parts[1], nil
+}
+
+// splitDependencyWrapper is the wrapper function for use in the template
+func splitDependencyWrapper(dep string) (string, string) {
+	groupID, artifactID, err := splitDependency(dep)
+	if err != nil {
+		fmt.Printf("Warning: Error splitting dependency '%s': %v\n", dep, err)
+		return "", "" // Or return some default/error values
+	}
+	return groupID, artifactID
 }
 
 // generateHTMLReport generates an HTML report of the dependencies and their licenses
@@ -194,14 +238,10 @@ func generateHTMLReport(dependencies map[string]string) error {
                 <tr>
                     <td>{{$dep}}</td>
                     <td>{{$version}}</td>
-                    {{ $groupID, $artifactID, $err := splitDependency $dep }}
-                    {{ if $err }}
-                    <td colspan="2">Error: {{$err}}</td>
-                    {{ else }}
+                    {{ $groupID, $artifactID := splitDependencyWrapper $dep }}
                     {{ $license, $url := getLicenseInfo $groupID $artifactID $version }}
                     <td>{{$license}}</td>
                     <td><a href="{{$url}}" target="_blank">View Details</a></td>
-                    {{ end }}
                 </tr>
                 {{end}}
             </tbody>
@@ -210,14 +250,8 @@ func generateHTMLReport(dependencies map[string]string) error {
     </html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
-		"splitDependency": func(dep string) (string, string, error) {
-			parts := strings.Split(dep, "/")
-			if len(parts) != 2 {
-				return "", "", fmt.Errorf("invalid dependency format: %s", dep)
-			}
-			return parts[0], parts[1], nil
-		},
-		"getLicenseInfo": getLicenseInfo,
+		"splitDependencyWrapper": splitDependencyWrapper,
+		"getLicenseInfo":         getLicenseInfo,
 	}).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("error creating template: %v", err)
