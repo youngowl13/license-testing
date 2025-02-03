@@ -51,71 +51,67 @@ func findTOMLFile(root string) (string, error) {
 
 // parseTOMLFile parses a TOML file and extracts dependencies and their versions
 func parseTOMLFile(filePath string) (map[string]string, error) {
-	dependencies := make(map[string]string)
-	tree, err := toml.LoadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("error loading TOML file: %v", err)
-	}
+    dependencies := make(map[string]string)
+    tree, err := toml.LoadFile(filePath)
+    if err != nil {
+        return nil, fmt.Errorf("error loading TOML file: %v", err)
+    }
 
-	versions, err := loadVersions(tree)
-	if err != nil {
-		return nil, err
-	}
+    versions, err := loadVersions(tree)
+    if err != nil {
+        return nil, err
+    }
 
-	librariesTree := tree.Get("libraries")
-	if librariesTree == nil {
-		return nil, fmt.Errorf("TOML file does not contain a 'libraries' table")
-	}
+    librariesTree := tree.Get("libraries")
+    if librariesTree == nil {
+        return nil, fmt.Errorf("TOML file does not contain a 'libraries' table")
+    }
 
-	libraries, ok := librariesTree.(*toml.Tree)
-	if !ok {
-		return nil, fmt.Errorf("'libraries' is not a valid TOML table")
-	}
+    libraries, ok := librariesTree.(*toml.Tree)
+    if !ok {
+        return nil, fmt.Errorf("'libraries' is not a valid TOML table")
+    }
 
-	for _, libKey := range libraries.Keys() {
-		libTree := libraries.Get(libKey)
-		if libTree == nil {
-			fmt.Printf("Warning: entry '%s' not found in libraries table.\n", libKey)
-			continue
-		}
+    for _, libKey := range libraries.Keys() {
+        libTree := libraries.Get(libKey)
+        if libTree == nil {
+            fmt.Printf("Warning: entry '%s' not found in libraries table.\n", libKey)
+            continue
+        }
 
-		lib, ok := libTree.(*toml.Tree)
-		if !ok {
-			fmt.Printf("Warning: entry '%s' in libraries table is not a valid TOML table.\n", libKey)
-			continue
-		}
+        lib, ok := libTree.(*toml.Tree)
+        if !ok {
+            fmt.Printf("Warning: entry '%s' in libraries table is not a valid TOML table.\n", libKey)
+            continue
+        }
 
-		module, ok := lib.Get("module").(string)
-		if !ok {
-			fmt.Printf("Warning: 'module' not found or not a string for library entry '%s'.\n", libKey)
-			continue
-		}
+        module, moduleOk := lib.Get("module").(string)
+        versionRef, versionRefOk := lib.Get("version.ref").(string)
 
-		versionRef, ok := lib.Get("version.ref").(string)
-		if !ok {
-			fmt.Printf("Warning: 'version.ref' not found for library entry '%s'.\n", libKey)
-			continue
-		}
+        if !moduleOk || !versionRefOk {
+            // If module or version.ref is missing, report as unknown and continue
+            dependencies[libKey] = "unknown"
+            continue
+        }
 
-		version, ok := versions[versionRef]
-		if !ok {
-			fmt.Printf("Warning: version reference '%s' not found in 'versions' table.\n", versionRef)
-			continue
-		}
+        version, versionOk := versions[versionRef]
+        if !versionOk {
+            fmt.Printf("Warning: version reference '%s' not found in 'versions' table.\n", versionRef)
+            dependencies[module] = "unknown"
+            continue
+        }
 
-		parts := strings.Split(module, ":")
-		if len(parts) != 2 {
-			fmt.Printf("Warning: invalid module format for library entry '%s'.\n", libKey)
-			continue
-		}
-		group := parts[0]
-		name := parts[1]
+        parts := strings.Split(module, ":")
+        if len(parts) != 2 {
+            fmt.Printf("Warning: invalid module format for library entry '%s'.\n", libKey)
+            continue
+        }
 
-		dependencyKey := fmt.Sprintf("%s/%s", group, name)
-		dependencies[dependencyKey] = version
-	}
+        dependencyKey := fmt.Sprintf("%s/%s", parts[0], parts[1])
+        dependencies[dependencyKey] = version
+    }
 
-	return dependencies, nil
+    return dependencies, nil
 }
 
 // loadVersions loads and flattens the versions table into a map
@@ -123,7 +119,7 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	versions := make(map[string]string)
 	versionsTree := tree.Get("versions")
 	if versionsTree == nil {
-		return versions, nil // Return empty map if no versions table found
+		return versions, nil
 	}
 
 	versionsMap, ok := versionsTree.(*toml.Tree)
