@@ -31,7 +31,7 @@ func findTOMLFile(root string) (string, error) {
 	var tomlFile string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return err // Handle errors during traversal
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".toml") {
 			tomlFile = path
@@ -39,10 +39,13 @@ func findTOMLFile(root string) (string, error) {
 		}
 		return nil
 	})
+	if err != nil { // Check for errors from filepath.Walk
+		return "", fmt.Errorf("error walking the path %q: %v", root, err)
+	}
 	if tomlFile == "" {
 		return "", fmt.Errorf("no .toml file found")
 	}
-	return tomlFile, nil
+	return tomlFile, nil // No error
 }
 
 // parseTOMLFile parses a TOML file and extracts dependencies and their versions
