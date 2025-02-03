@@ -17,12 +17,10 @@ coil = "2.5.0"
 activity-compose = "1.9.0"
 work-runtime-ktx = "2.9.0"
 desugar-jdk-libs = "2.0.4"
-
 nonExistentVersion = "99.99.99"
 
 [libraries]
 non-existent-dependency = { group = "com.this.group.probably", name = "does-not-exist", version.ref = "nonExistentVersion" }
-
 androidx-compose-ui = { module = "androidx.compose.ui:ui", version.ref = "androidx-compose-ui" }
 androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling", version.ref = "androidx-compose-ui" }
 androidx-compose-foundation = { module = "androidx.compose.foundation:foundation", version.ref = "androidx-compose" }
