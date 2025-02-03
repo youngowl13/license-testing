@@ -123,7 +123,7 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	versions := make(map[string]string)
 	versionsTree := tree.Get("versions")
 	if versionsTree == nil {
-		return versions, nil
+		return versions, nil // Return empty map if no versions table found
 	}
 
 	versionsMap, ok := versionsTree.(*toml.Tree)
@@ -211,7 +211,7 @@ func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, e
 		}
 	}
 
-	return "", "", nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
+	return "", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version), nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
 }
 
 // getLicenseInfo fetches the license details for a dependency
@@ -232,7 +232,7 @@ func splitDependency(dep string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-// LicenseInfo holds the license name and URL
+// LicenseInfo holds the license name, URL, and POM file URL
 type LicenseInfo struct {
 	Name    string
 	URL     string
