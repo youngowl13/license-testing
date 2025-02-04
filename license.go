@@ -445,9 +445,8 @@ func main() {
 
 	fmt.Printf("Output saved to: %s\n", outputFilePath)
 
-	// Print the content of output.txt to the console
-	fmt.Println("Content of output.txt:")
-	err := ioutil.ReadFile(outputFilePath)
+	// The 'content' variable was removed
+
 	if err != nil {
 		fmt.Printf("Error generating report: %v\n", err)
 		os.Exit(1)
