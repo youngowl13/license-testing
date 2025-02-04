@@ -446,6 +446,4 @@ func main() {
 	fmt.Printf("Output saved to: %s\n", outputFilePath)
 
 	// Print the content of output.txt to the console
-	fmt.Println("Content of output.txt:")
-	content, err := ioutil.ReadFile(outputFilePath)
-	if err != nil {
+	fmt
