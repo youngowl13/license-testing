@@ -234,7 +234,7 @@ func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, e
 
 // getProjectURL constructs the project URL based on the source URL
 func getProjectURL(sourceURL, version, groupID, artifactID string) string {
-	// For Google Maven, construct the project URL to the artifact's directory
+	// For Google Maven, construct the project URL to the artifact's version
 	if strings.Contains(sourceURL, "maven.google.com") {
 		return fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", groupID, artifactID, version)
 	}
@@ -445,4 +445,11 @@ func main() {
 
 	fmt.Printf("Output saved to: %s\n", outputFilePath)
 
-	// Print
+	// Print the content of output.txt to the console
+	fmt.Println("Content of output.txt:")
+	content, err := ioutil.ReadFile(outputFilePath)
+	if err != nil {
+		fmt.Printf("Error generating report: %v\n", err)
+		os.Exit(1)
+	}
+}
