@@ -314,7 +314,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 	htmlTemplate := `<!DOCTYPE html>
 <html>
 <head>
-    <title>Kotlin Dependency License Report</title>
+    <title> Kotlin Dependency License Report </title>
     <style>
         body { font-family: Arial, sans-serif; }
         h1 { color: #2c3e50; }
