@@ -15,19 +15,19 @@ import (
 	"github.com/pelletier/go-toml"
 )
 
-// License represents the license details from a POM file
+// License represents the license details from a POM file.
 type License struct {
 	Name string `xml:"name"`
 	URL  string `xml:"url"`
 }
 
-// MavenPOM represents the structure of a POM file
+// MavenPOM represents the structure of a Maven POM file.
 type MavenPOM struct {
 	XMLName  xml.Name  `xml:"project"`
 	Licenses []License `xml:"licenses>license"`
 }
 
-// findTOMLFile searches for a TOML file in the current directory recursively
+// findTOMLFile searches for a TOML file in the current directory recursively.
 func findTOMLFile(root string) (string, error) {
 	var tomlFile string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -49,7 +49,7 @@ func findTOMLFile(root string) (string, error) {
 	return tomlFile, nil
 }
 
-// parseTOMLFile parses a TOML file and extracts dependencies and their versions
+// parseTOMLFile parses a TOML file and extracts dependencies and their versions.
 func parseTOMLFile(filePath string) (map[string]string, error) {
 	dependencies := make(map[string]string)
 	tree, err := toml.LoadFile(filePath)
@@ -118,12 +118,12 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	return dependencies, nil
 }
 
-// loadVersions loads and flattens the versions table into a map
+// loadVersions loads and flattens the versions table into a map.
 func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	versions := make(map[string]string)
 	versionsTree := tree.Get("versions")
 	if versionsTree == nil {
-		return versions, nil // Return empty map if no versions table found
+		return versions, nil // Return empty map if no versions table found.
 	}
 
 	versionsMap, ok := versionsTree.(*toml.Tree)
@@ -146,7 +146,7 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	return versions, nil
 }
 
-// fetchPOMFromURL fetches and unmarshals the POM from the given URL
+// fetchPOMFromURL fetches and unmarshals the POM from the given URL.
 func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -172,35 +172,43 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	return &pom, nil
 }
 
-// fetchPOM fetches the POM file concurrently from Maven Central and Google's Android Maven Repository
+// fetchPOM concurrently attempts to fetch the POM file from Maven Central and Google.
+// For Google artifacts, the POM file is fetched using the dl.google.com endpoint,
+// but the project "View Details" link will point to maven.google.com.
 func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, error) {
 	groupPath := strings.ReplaceAll(groupID, ".", "/")
-	mavenURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
-	googleURL := fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", groupID, artifactID, version)
+
+	// URL to fetch the POM file from Maven Central.
+	mavenPOMURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
+	// URL to fetch the POM file from Google's Maven repository.
+	googlePOMURL := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
 
 	type result struct {
 		pom        *MavenPOM
-		sourceURL  string
-		projectURL string
+		sourceURL  string // URL used to fetch the POM file.
+		projectURL string // URL used for the "View Details" link.
 		err        error
 	}
 	resultCh := make(chan result, 2)
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// Try Maven Central.
 	go func() {
 		defer wg.Done()
-		pom, err := fetchPOMFromURL(mavenURL)
-		projectURL := getProjectURL(mavenURL, version, groupID, artifactID)
-		resultCh <- result{pom, mavenURL, projectURL, err}
+		pom, err := fetchPOMFromURL(mavenPOMURL)
+		// For Maven Central, the details link points to the version directory.
+		projectURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
+		resultCh <- result{pom, mavenPOMURL, projectURL, err}
 	}()
 
+	// Try Google's Maven repository.
 	go func() {
 		defer wg.Done()
-		pom, err := fetchPOMFromURL(googleURL)
-		projectURL := getProjectURL(googleURL, version, groupID, artifactID)
-		resultCh <- result{pom, googleURL, projectURL, err}
+		pom, err := fetchPOMFromURL(googlePOMURL)
+		// Even though the POM is fetched from dl.google.com, use maven.google.com for the details link.
+		projectURL := fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", groupID, artifactID, version)
+		resultCh <- result{pom, googlePOMURL, projectURL, err}
 	}()
 
 	go func() {
@@ -208,57 +216,42 @@ func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, e
 		close(resultCh)
 	}()
 
-	var finalSourceURL string
-	var finalProjectURL string
+	var finalSourceURL, finalProjectURL string
 	var finalPOM *MavenPOM
 	var finalError error
 
 	for res := range resultCh {
-		if res.err == nil {
+		if res.err == nil && res.pom != nil {
 			finalSourceURL = res.sourceURL
 			finalProjectURL = res.projectURL
 			finalPOM = res.pom
 			finalError = nil
-			break // Use the first successful result
+			break // Use the first successful result.
 		} else {
-			finalError = res.err // Capture the last error if both fail
+			finalError = res.err // Capture last error if both fail.
 		}
 	}
 
-	if finalError != nil {
-		return "", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version), nil, finalError
+	if finalPOM == nil {
+		// If neither repository returned a valid POM, fallback to a Google search link.
+		searchURL := fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version)
+		return "", searchURL, nil, finalError
 	}
 
 	return finalSourceURL, finalProjectURL, finalPOM, nil
 }
 
-// getProjectURL constructs the project URL based on the source URL
-func getProjectURL(sourceURL, version, groupID, artifactID string) string {
-	// For Google Maven, construct the project URL to the artifact's version
-	if strings.Contains(sourceURL, "maven.google.com") {
-		return fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", groupID, artifactID, version)
-	}
-
-	// For Maven Central, construct the project URL to the artifact's version directory
-	if strings.Contains(sourceURL, "repo1.maven.org") {
-		groupPath := strings.ReplaceAll(groupID, ".", "/")
-		return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
-	}
-
-	return ""
-}
-
-// getLicenseInfo fetches the license details for a dependency
+// getLicenseInfo fetches the license details for a dependency.
+// On success, it returns the license name, the "View Details" link (project URL), and the POM file URL.
 func getLicenseInfo(groupID, artifactID, version string) (string, string, string) {
 	sourceURL, projectURL, pom, err := fetchPOM(groupID, artifactID, version)
 	if err != nil || pom == nil || len(pom.Licenses) == 0 {
 		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version), ""
 	}
-
 	return pom.Licenses[0].Name, projectURL, sourceURL
 }
 
-// splitDependency splits a dependency string into groupID and artifactID
+// splitDependency splits a dependency string (formatted as "groupID/artifactID") into its parts.
 func splitDependency(dep string) (string, string, error) {
 	parts := strings.Split(dep, "/")
 	if len(parts) != 2 {
@@ -267,14 +260,14 @@ func splitDependency(dep string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-// LicenseInfo holds the license name, URL, and POM file URL
+// LicenseInfo holds the license name, the project details link, and the POM file link.
 type LicenseInfo struct {
 	Name       string
-	URL        string
-	POMFileURL string
+	URL        string // Project details link ("View Details")
+	POMFileURL string // POM file link ("View POM")
 }
 
-// getLicenseInfoWrapper is a wrapper for getLicenseInfo for use in the template
+// getLicenseInfoWrapper wraps getLicenseInfo for use in the HTML template.
 func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 	groupID, artifactID, err := splitDependency(dep)
 	if err != nil {
@@ -286,7 +279,7 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 	return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
 }
 
-// isCopyleft determines if a license is copyleft based on its name
+// isCopyleft determines if a license is considered copyleft based on keywords.
 func isCopyleft(licenseName string) bool {
 	copyleftKeywords := []string{
 		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
@@ -302,14 +295,14 @@ func isCopyleft(licenseName string) bool {
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
-		if strings.Contains(licenseNameUpper, keyword) || strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
+		if strings.Contains(licenseNameUpper, keyword) {
 			return true
 		}
 	}
 	return false
 }
 
-// generateHTMLReport generates an HTML report of the dependencies and their licenses
+// generateHTMLReport generates an HTML report of the dependencies and their licenses.
 func generateHTMLReport(dependencies map[string]string) error {
 	fmt.Println("Dependencies:", dependencies)
 	outputDir := "./license-checker"
@@ -318,56 +311,56 @@ func generateHTMLReport(dependencies map[string]string) error {
 	}
 
 	htmlTemplate := `<!DOCTYPE html>
-	<html>
-	<head>
-		<title>Dependency License Report</title>
-		<style>
-			body { font-family: Arial, sans-serif; }
-			h1 { color: #2c3e50; }
-			table { width: 100%; border-collapse: collapse; }
-			th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
-			th { background-color: #f0f0f0; }
-			tr:nth-child(even) { background-color: #f9f9f9; }
-			a { color: #3498db; text-decoration: none; }
-			a:hover { text-decoration: underline; }
-			tr.copyleft { background-color: #ffdddd; }
-			tr.non-copyleft { background-color: #ddffdd; }
-			tr.unknown-license { background-color: #ffffdd; }
-		</style>
-	</head>
-	<body>
-		<h1>Dependency License Report</h1>
-		<table>
-			<thead>
-				<tr>
-					<th>Dependency</th>
-					<th>Version</th>
-					<th>License</th>
-					<th>Project Details</th>
-					<th>POM File</th>
-				</tr>
-			</thead>
-			<tbody>
-				{{range $dep, $version := .}}
-				{{ $info := getLicenseInfoWrapper $dep $version }}
-				{{ if eq $info.Name "Unknown" }}
-					<tr class="unknown-license">
-				{{ else if isCopyleft $info.Name }}
-					<tr class="copyleft">
-				{{ else }}
-					<tr class="non-copyleft">
-				{{ end }}
-					<td>{{ $dep }}</td>
-					<td>{{ $version }}</td>
-					<td>{{ $info.Name }}</td>
-					<td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
-					<td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
-				</tr>
-				{{end}}
-			</tbody>
-		</table>
-	</body>
-	</html>`
+<html>
+<head>
+    <title>Dependency License Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        h1 { color: #2c3e50; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 8px; border: 1px solid #ddd; }
+        th { background-color: #f0f0f0; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        a { color: #3498db; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        tr.copyleft { background-color: #ffdddd; }
+        tr.non-copyleft { background-color: #ddffdd; }
+        tr.unknown-license { background-color: #ffffdd; }
+    </style>
+</head>
+<body>
+    <h1>Dependency License Report</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Dependency</th>
+                <th>Version</th>
+                <th>License</th>
+                <th>Project Details</th>
+                <th>POM File</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $dep, $version := .}}
+            {{ $info := getLicenseInfoWrapper $dep $version }}
+            {{ if eq $info.Name "Unknown" }}
+                <tr class="unknown-license">
+            {{ else if isCopyleft $info.Name }}
+                <tr class="copyleft">
+            {{ else }}
+                <tr class="non-copyleft">
+            {{ end }}
+                <td>{{ $dep }}</td>
+                <td>{{ $version }}</td>
+                <td>{{ $info.Name }}</td>
+                <td><a href="{{ $info.URL }}" target="_blank">View Details</a></td>
+                <td><a href="{{ $info.POMFileURL }}" target="_blank">View POM</a></td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+</html>`
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
 		"getLicenseInfoWrapper": getLicenseInfoWrapper,
@@ -393,7 +386,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 	return nil
 }
 
-// captureOutput captures stdout and stderr to a buffer
+// captureOutput captures stdout and stderr to a buffer.
 func captureOutput(f func()) string {
 	var buf bytes.Buffer
 	oldStdout := os.Stdout
@@ -414,7 +407,7 @@ func captureOutput(f func()) string {
 	return buf.String()
 }
 
-// main is the entry point of the program
+// main is the entry point of the program.
 func main() {
 	tomlFilePath, err := findTOMLFile(".")
 	if err != nil {
@@ -430,12 +423,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Capture output for debugging
+	// Capture output for debugging.
 	output := captureOutput(func() {
 		err = generateHTMLReport(dependencies)
 	})
 
-	// Save output to a text file
+	// Save output to a text file.
 	outputFilePath := filepath.Join(".", "output.txt")
 	err = ioutil.WriteFile(outputFilePath, []byte(output), 0644)
 	if err != nil {
@@ -444,11 +437,4 @@ func main() {
 	}
 
 	fmt.Printf("Output saved to: %s\n", outputFilePath)
-
-	// The 'content' variable was removed
-
-	if err != nil {
-		fmt.Printf("Error generating report: %v\n", err)
-		os.Exit(1)
-	}
 }
