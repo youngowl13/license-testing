@@ -280,6 +280,7 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 }
 
 // isCopyleft determines if a license is considered copyleft based on keywords.
+// It converts both the license name and each keyword to uppercase to ensure a case-insensitive match.
 func isCopyleft(licenseName string) bool {
 	copyleftKeywords := []string{
 		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
@@ -295,7 +296,7 @@ func isCopyleft(licenseName string) bool {
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
-		if strings.Contains(licenseNameUpper, keyword) {
+		if strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
 			return true
 		}
 	}
