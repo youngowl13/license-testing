@@ -176,12 +176,13 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, error) {
 	groupPath := strings.ReplaceAll(groupID, ".", "/")
 	mavenURL := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
-	googleURL := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifactID, version, artifactID, version)
+	googleURL := fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", groupID, artifactID, version)
 
 	type result struct {
-		pom       *MavenPOM
-		sourceURL string
-		err       error
+		pom        *MavenPOM
+		sourceURL  string
+		projectURL string
+		err        error
 	}
 	resultCh := make(chan result, 2)
 
@@ -191,13 +192,15 @@ func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, e
 	go func() {
 		defer wg.Done()
 		pom, err := fetchPOMFromURL(mavenURL)
-		resultCh <- result{pom, mavenURL, err}
+		projectURL := getProjectURL(mavenURL, version, groupID, artifactID)
+		resultCh <- result{pom, mavenURL, projectURL, err}
 	}()
 
 	go func() {
 		defer wg.Done()
 		pom, err := fetchPOMFromURL(googleURL)
-		resultCh <- result{pom, googleURL, err}
+		projectURL := getProjectURL(googleURL, version, groupID, artifactID)
+		resultCh <- result{pom, googleURL, projectURL, err}
 	}()
 
 	go func() {
@@ -205,22 +208,54 @@ func fetchPOM(groupID, artifactID, version string) (string, string, *MavenPOM, e
 		close(resultCh)
 	}()
 
+	var finalSourceURL string
+	var finalProjectURL string
+	var finalPOM *MavenPOM
+	var finalError error
+
 	for res := range resultCh {
 		if res.err == nil {
-			return res.sourceURL, "", res.pom, nil
+			finalSourceURL = res.sourceURL
+			finalProjectURL = res.projectURL
+			finalPOM = res.pom
+			finalError = nil
+			break // Use the first successful result
+		} else {
+			finalError = res.err // Capture the last error if both fail
 		}
 	}
 
-	return "", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version), nil, fmt.Errorf("POM not found in Maven Central or Google's Android Maven Repository for %s:%s:%s", groupID, artifactID, version)
+	if finalError != nil {
+		return "", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version), nil, finalError
+	}
+
+	return finalSourceURL, finalProjectURL, finalPOM, nil
+}
+
+// getProjectURL constructs the project URL based on the source URL
+func getProjectURL(sourceURL, version, groupID, artifactID string) string {
+	// For Google Maven, construct the project URL to the artifact's directory
+	if strings.Contains(sourceURL, "maven.google.com") {
+		return fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", groupID, artifactID, version)
+	}
+
+	// For Maven Central, construct the project URL to the artifact's version directory
+	if strings.Contains(sourceURL, "repo1.maven.org") {
+		groupPath := strings.ReplaceAll(groupID, ".", "/")
+		return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
+	}
+
+	return ""
 }
 
 // getLicenseInfo fetches the license details for a dependency
 func getLicenseInfo(groupID, artifactID, version string) (string, string, string) {
-	sourceURL, googleSearchURL, pom, err := fetchPOM(groupID, artifactID, version)
+	sourceURL, projectURL, pom, err := fetchPOM(groupID, artifactID, version)
 	if err != nil || pom == nil || len(pom.Licenses) == 0 {
-		return "Unknown", googleSearchURL, ""
+		return "Unknown", fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s+license", groupID, artifactID, version), ""
 	}
-	return pom.Licenses[0].Name, pom.Licenses[0].URL, sourceURL
+
+	return pom.Licenses[0].Name, projectURL, sourceURL
 }
 
 // splitDependency splits a dependency string into groupID and artifactID
@@ -247,22 +282,8 @@ func getLicenseInfoWrapper(dep, version string) LicenseInfo {
 		return LicenseInfo{"Unknown", "", ""}
 	}
 
-	name, licenseURL, pomurl := getLicenseInfo(groupID, artifactID, version)
-
-	// Construct a URL to the dependency on Maven Central or Google Maven Repository
-	var detailsURL string
-	if name == "Unknown" {
-		detailsURL = licenseURL // Use Google Search URL for unknown licenses
-	} else {
-		groupPath := strings.ReplaceAll(groupID, ".", "/")
-		if strings.HasPrefix(pomurl, "https://repo1.maven.org/maven2/") {
-			detailsURL = fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/", groupPath, artifactID, version)
-		} else if strings.HasPrefix(pomurl, "https://dl.google.com/dl/android/maven2/") {
-			detailsURL = fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/", groupPath, artifactID, version)
-		}
-	}
-
-	return LicenseInfo{Name: name, URL: detailsURL, POMFileURL: pomurl}
+	name, url, pomurl := getLicenseInfo(groupID, artifactID, version)
+	return LicenseInfo{Name: name, URL: url, POMFileURL: pomurl}
 }
 
 // isCopyleft determines if a license is copyleft based on its name
@@ -281,7 +302,7 @@ func isCopyleft(licenseName string) bool {
 	}
 	licenseNameUpper := strings.ToUpper(licenseName)
 	for _, keyword := range copyleftKeywords {
-		if strings.Contains(licenseNameUpper, keyword) {
+		if strings.Contains(licenseNameUpper, keyword) || strings.Contains(licenseNameUpper, strings.ToUpper(keyword)) {
 			return true
 		}
 	}
@@ -309,9 +330,9 @@ func generateHTMLReport(dependencies map[string]string) error {
 			tr:nth-child(even) { background-color: #f9f9f9; }
 			a { color: #3498db; text-decoration: none; }
 			a:hover { text-decoration: underline; }
-			.copyleft { background-color: #ffdddd; }
-			.non-copyleft { background-color: #ddffdd; }
-			.unknown-license { background-color: #ffffdd; }
+			tr.copyleft { background-color: #ffdddd; }
+			tr.non-copyleft { background-color: #ddffdd; }
+			tr.unknown-license { background-color: #ffffdd; }
 		</style>
 	</head>
 	<body>
@@ -322,7 +343,7 @@ func generateHTMLReport(dependencies map[string]string) error {
 					<th>Dependency</th>
 					<th>Version</th>
 					<th>License</th>
-					<th>License Details</th>
+					<th>Project Details</th>
 					<th>POM File</th>
 				</tr>
 			</thead>
@@ -428,13 +449,3 @@ func main() {
 	fmt.Println("Content of output.txt:")
 	content, err := ioutil.ReadFile(outputFilePath)
 	if err != nil {
-		fmt.Printf("Error reading output file: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(string(content))
-
-	if err != nil {
-		fmt.Printf("Error generating report: %v\n", err)
-		os.Exit(1)
-	}
-}
