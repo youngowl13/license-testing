@@ -447,7 +447,7 @@ func main() {
 
 	// Print the content of output.txt to the console
 	fmt.Println("Content of output.txt:")
-	content, err := ioutil.ReadFile(outputFilePath)
+	err := ioutil.ReadFile(outputFilePath)
 	if err != nil {
 		fmt.Printf("Error generating report: %v\n", err)
 		os.Exit(1)
