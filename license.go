@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/xml"
 	"fmt"
 	"html/template"
@@ -17,13 +16,13 @@ import (
 )
 
 // ----------------------------------------------------------------------
-// CONFIG
+// CONFIG & CONSTANTS
 // ----------------------------------------------------------------------
 
 const (
-	localPOMCacheDir = ".pom-cache"     // disk caching for fetched POMs
-	pomWorkerCount   = 10               // concurrency
-	fetchTimeout     = 30 * time.Second // HTTP GET timeout
+	localPOMCacheDir = ".pom-cache"     // Where we cache fetched POM files
+	pomWorkerCount   = 10               // concurrency workers
+	fetchTimeout     = 30 * time.Second // HTTP request timeout
 )
 
 // ----------------------------------------------------------------------
@@ -35,13 +34,13 @@ var (
 	wgWorkers   sync.WaitGroup
 
 	pomCache    sync.Map // key="group:artifact:version" => *MavenPOM
-	parentVisit sync.Map // detect parent cycles
+	parentVisit sync.Map // detect cycles in parent POM resolution
 
 	channelOpen  = true
 	channelMutex sync.Mutex
 )
 
-// spdxLicenseMap: minimal SPDx => (FriendlyName, Copyleft)
+// spdxLicenseMap for detecting known licenses
 var spdxLicenseMap = map[string]struct {
 	Name     string
 	Copyleft bool
@@ -62,13 +61,12 @@ var spdxLicenseMap = map[string]struct {
 // DATA STRUCTURES
 // ----------------------------------------------------------------------
 
-// POMLicenses
 type License struct {
 	Name string `xml:"name"`
 	URL  string `xml:"url"`
 }
 
-// POMDep is for <dependency> in the POM
+// POMDep for <dependency> blocks
 type POMDep struct {
 	GroupID    string `xml:"groupId"`
 	ArtifactID string `xml:"artifactId"`
@@ -77,14 +75,14 @@ type POMDep struct {
 	Optional   string `xml:"optional"`
 }
 
-// MavenPOM is the minimal structure we parse from each .pom file
+// MavenPOM is minimal structure for BFS
 type MavenPOM struct {
 	XMLName     xml.Name  `xml:"project"`
 	Licenses    []License `xml:"licenses>license"`
 	Dependencies []POMDep `xml:"dependencies>dependency"`
 }
 
-// BFS node for the tree
+// BFS node
 type DependencyNode struct {
 	Name       string
 	Version    string
@@ -94,7 +92,7 @@ type DependencyNode struct {
 	Transitive []*DependencyNode
 }
 
-// ExtendedDep holds info for the final table (Parent, License, etc.)
+// For final table
 type ExtendedDep struct {
 	Display string
 	Lookup  string
@@ -102,7 +100,7 @@ type ExtendedDep struct {
 	License string
 }
 
-// TomlReportSection is your final object for each TOML file
+// TomlReportSection holds the BFS results for a single TOML file
 type TomlReportSection struct {
 	FilePath        string
 	DirectDeps      map[string]string    // direct from TOML
@@ -159,7 +157,7 @@ func findTOMLFile(root string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("error walking the path %q: %v", root, err)
+		return "", fmt.Errorf("error walking path %q: %v", root, err)
 	}
 	if tomlFile == "" {
 		return "", fmt.Errorf("no .toml file found")
@@ -178,7 +176,6 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	librariesTree := tree.Get("libraries")
 	if librariesTree == nil {
 		return nil, fmt.Errorf("TOML file does not contain a 'libraries' table")
@@ -200,28 +197,28 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 		}
 		module, ok := lib.Get("module").(string)
 		if !ok {
-			fmt.Printf("Warning: 'module' not found or not a string for library entry '%s'.\n", libKey)
+			fmt.Printf("Warning: 'module' not found or not a string for library '%s'.\n", libKey)
 			continue
 		}
 		versionRef, ok := lib.Get("version.ref").(string)
 		if !ok {
-			fmt.Printf("Warning: 'version.ref' not found for library entry '%s'.\n", libKey)
+			fmt.Printf("Warning: 'version.ref' not found for library '%s'.\n", libKey)
 			continue
 		}
 		versionVal, ok := versions[versionRef]
 		if !ok {
-			fmt.Printf("Warning: version reference '%s' not found in 'versions' table for library '%s'.\n", versionRef, libKey)
+			fmt.Printf("Warning: version ref '%s' not found in 'versions' table for '%s'.\n", versionRef, libKey)
 			versionVal = "unknown"
 		}
 		parts := strings.Split(module, ":")
 		if len(parts) != 2 {
-			fmt.Printf("Warning: invalid module format for library entry '%s'.\n", libKey)
+			fmt.Printf("Warning: invalid module format '%s' for library '%s'.\n", module, libKey)
 			continue
 		}
 		group := parts[0]
 		name := parts[1]
-		dependencyKey := fmt.Sprintf("%s/%s", group, name)
-		dependencies[dependencyKey] = versionVal
+		key := fmt.Sprintf("%s/%s", group, name)
+		dependencies[key] = versionVal
 	}
 	return dependencies, nil
 }
@@ -232,19 +229,19 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	if versionsTree == nil {
 		return versions, nil
 	}
-	versionsMap, ok := versionsTree.(*toml.Tree)
+	versMap, ok := versionsTree.(*toml.Tree)
 	if !ok {
 		return nil, fmt.Errorf("'versions' is not a valid TOML table")
 	}
-	for _, key := range versionsMap.Keys() {
-		value := versionsMap.Get(key)
+	for _, key := range versMap.Keys() {
+		value := versMap.Get(key)
 		switch v := value.(type) {
 		case string:
 			versions[key] = v
 		case *toml.Tree:
-			fmt.Printf("Warning: nested tables in 'versions' are not supported. Skipping key '%s'.\n", key)
+			fmt.Printf("Warning: nested table in 'versions' => skipping '%s'\n", key)
 		default:
-			fmt.Printf("Warning: unexpected type for version '%s'.\n", key)
+			fmt.Printf("Warning: unexpected type for version '%s'\n", key)
 		}
 	}
 	return versions, nil
@@ -257,15 +254,16 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 func buildTransitiveClosure(sections []TomlReportSection) {
 	for i := range sections {
 		sec := &sections[i]
-		fmt.Printf("BFS: Building transitive closure for TOML file: %s\n", sec.FilePath)
+		fmt.Printf("BFS: Building transitive closure for file: %s\n", sec.FilePath)
+
 		allDeps := make(map[string]ExtendedDep) // "group/artifact@version" => ExtendedDep
 
-		// add direct
-		for ga, version := range sec.DirectDeps {
-			key := ga + "@" + version
+		// fill from direct
+		for ga, v := range sec.DirectDeps {
+			key := ga + "@" + v
 			allDeps[key] = ExtendedDep{
-				Display: version,
-				Lookup:  version,
+				Display: v,
+				Lookup:  v,
 				Parent:  "direct",
 				License: "",
 			}
@@ -276,7 +274,7 @@ func buildTransitiveClosure(sections []TomlReportSection) {
 		var queue []queueItem
 		visited := make(map[string]bool)
 
-		// BFS init
+		// BFS init from direct
 		for ga, ver := range sec.DirectDeps {
 			key := ga + "@" + ver
 			visited[key] = true
@@ -296,31 +294,30 @@ func buildTransitiveClosure(sections []TomlReportSection) {
 			})
 		}
 
-		// BFS
 		for len(queue) > 0 {
 			it := queue[0]
 			queue = queue[1:]
 			fmt.Printf("BFS: Processing %s@%s (depth %d)\n", it.GroupArtifact, it.Version, it.Depth)
-			group, artifact := splitGA(it.GroupArtifact)
+			group, artifact := splitGA(it.GroupArtifact) // define below
 			if group == "" || artifact == "" {
 				continue
 			}
-			// skip if unknown
 			if strings.ToLower(it.Version) == "unknown" {
+				fmt.Printf("BFS: version was 'unknown'; skipping deeper BFS.\n")
 				continue
 			}
 			pom, err := concurrentFetchPOM(group, artifact, it.Version)
 			if err != nil || pom == nil {
-				fmt.Printf("BFS: skipping %s:%s:%s => fetch error or nil\n", group, artifact, it.Version)
+				fmt.Printf("BFS: skip %s:%s:%s => fetch error or nil\n", group, artifact, it.Version)
 				continue
 			}
-			// attach license
+			// attach license to BFS node
 			if it.ParentNode != nil {
 				lic := detectLicense(pom)
 				it.ParentNode.License = lic
 				it.ParentNode.Copyleft = isCopyleft(lic)
 			}
-			// parse sub-deps from <dependencies>
+			// parse sub-deps
 			for _, d := range pom.Dependencies {
 				if skipScope(d.Scope, d.Optional) {
 					continue
@@ -388,22 +385,17 @@ func buildTransitiveClosure(sections []TomlReportSection) {
 				}
 			}
 		}
-
-		// fill BFS results into allDeps again
-		for _, nd := range rootNodes {
-			fillDepMapToml(nd, allDeps)
+		// fill BFS results => license etc.
+		for _, root := range rootNodes {
+			fillDepMap(root, allDeps)
 		}
-
-		// store final
 		sec.AllDeps = allDeps
 		sec.DependencyTree = rootNodes
 
-		// count BFS nodes, direct, transitive
 		total := len(allDeps)
-		// direct are those "Parent=direct" or "ends in @unknown"
 		directCount := 0
-		for k, ed := range allDeps {
-			if ed.Parent == "direct" || strings.HasSuffix(k, "@unknown") {
+		for k, ext := range allDeps {
+			if ext.Parent == "direct" || strings.HasSuffix(k, "@unknown") {
 				directCount++
 			}
 		}
@@ -411,7 +403,7 @@ func buildTransitiveClosure(sections []TomlReportSection) {
 	}
 }
 
-// skipScope returns true if scope in {test,provided,system} or optional="true"
+// skipScope excludes test/provided/system & optional
 func skipScope(scope, optional string) bool {
 	s := strings.ToLower(strings.TrimSpace(scope))
 	if s == "test" || s == "provided" || s == "system" {
@@ -423,8 +415,8 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-// fillDepMapToml recursively updates the BFS results
-func fillDepMapToml(n *DependencyNode, all map[string]ExtendedDep) {
+// fill BFS results
+func fillDepMap(n *DependencyNode, all map[string]ExtendedDep) {
 	key := n.Name + "@" + n.Version
 	info, exists := all[key]
 	if !exists {
@@ -441,11 +433,11 @@ func fillDepMapToml(n *DependencyNode, all map[string]ExtendedDep) {
 	info.License = n.License
 	all[key] = info
 	for _, c := range n.Transitive {
-		fillDepMapToml(c, all)
+		fillDepMap(c, all)
 	}
 }
 
-// concurrency
+// concurrency worker
 func pomFetchWorker() {
 	defer wgWorkers.Done()
 	for req := range pomRequests {
@@ -455,7 +447,6 @@ func pomFetchWorker() {
 	}
 }
 
-// concurrentFetchPOM checks cache, then calls worker if channel is open, or direct fetch
 func concurrentFetchPOM(g, a, v string) (*MavenPOM, error) {
 	key := fmt.Sprintf("%s:%s:%s", g, a, v)
 	if c, ok := pomCache.Load(key); ok {
@@ -490,11 +481,9 @@ func concurrentFetchPOM(g, a, v string) (*MavenPOM, error) {
 // fetchRemotePOM tries maven central & google
 func fetchRemotePOM(g, a, v string) (*MavenPOM, error) {
 	groupPath := strings.ReplaceAll(g, ".", "/")
-	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom",
-		groupPath, a, v, a, v)
-	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom",
-		groupPath, a, v, a, v)
-	fmt.Printf("fetchRemotePOM => Trying maven central: %s\n", urlC)
+	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
+	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
+	fmt.Printf("fetchRemotePOM => Trying central: %s\n", urlC)
 	if pm, e := fetchPOMFromURL(urlC); e == nil && pm != nil {
 		pomCache.Store(fmt.Sprintf("%s:%s:%s", g, a, v), pm)
 		return pm, nil
@@ -504,7 +493,7 @@ func fetchRemotePOM(g, a, v string) (*MavenPOM, error) {
 		pomCache.Store(fmt.Sprintf("%s:%s:%s", g, a, v), pm)
 		return pm, nil
 	}
-	return nil, fmt.Errorf("could not fetch remote POM for %s:%s:%s", g, a, v)
+	return nil, fmt.Errorf("cannot fetch remote POM for %s:%s:%s", g, a, v)
 }
 
 func fetchPOMFromURL(url string) (*MavenPOM, error) {
@@ -528,7 +517,7 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	return &pom, nil
 }
 
-// detectLicense sees if there's a first license
+// detectLicense
 func detectLicense(pom *MavenPOM) string {
 	if len(pom.Licenses) == 0 {
 		return "Unknown"
@@ -538,15 +527,15 @@ func detectLicense(pom *MavenPOM) string {
 		return "Unknown"
 	}
 	up := strings.ToUpper(lic)
-	for spdxID, data := range spdxLicenseMap {
+	for spdxID, info := range spdxLicenseMap {
 		if strings.EqualFold(lic, spdxID) || up == strings.ToUpper(spdxID) {
-			return data.Name
+			return info.Name
 		}
 	}
 	return lic
 }
 
-// isCopyleft checks for recognized copyleft keywords
+// isCopyleft
 func isCopyleft(name string) bool {
 	for spdxID, data := range spdxLicenseMap {
 		if data.Copyleft && (strings.EqualFold(name, data.Name) || strings.EqualFold(name, spdxID)) {
@@ -574,11 +563,20 @@ func isCopyleft(name string) bool {
 	return false
 }
 
+// splitGA => "group/artifact" => (group, artifact)
+func splitGA(ga string) (string, string) {
+	parts := strings.Split(ga, "/")
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
 // ----------------------------------------------------------------------
-// HTML REPORT (with parent column + BFS tree)
+// HTML REPORT
 // ----------------------------------------------------------------------
 
-func buildDependencyTreeHTML(node *DependencyNode, level int) string {
+func buildTreeHTML(node *DependencyNode, level int) string {
 	class := "non-copyleft"
 	if node.License == "Unknown" {
 		class = "unknown-license"
@@ -590,16 +588,16 @@ func buildDependencyTreeHTML(node *DependencyNode, level int) string {
 	sb.WriteString(fmt.Sprintf(`<details class="%s" style="margin-left:%dem;">`, class, level))
 	sb.WriteString(fmt.Sprintf(`<summary>%s</summary>`, template.HTMLEscapeString(summary)))
 	for _, c := range node.Transitive {
-		sb.WriteString(buildDependencyTreeHTML(c, level+1))
+		sb.WriteString(buildTreeHTML(c, level+1))
 	}
 	sb.WriteString("</details>")
 	return sb.String()
 }
 
-func buildDependencyTreesHTML(nodes []*DependencyNode) template.HTML {
+func buildTreesHTML(nodes []*DependencyNode) template.HTML {
 	var buf strings.Builder
 	for _, n := range nodes {
-		buf.WriteString(buildDependencyTreeHTML(n, 0))
+		buf.WriteString(buildTreeHTML(n, 0))
 	}
 	return template.HTML(buf.String())
 }
@@ -609,7 +607,7 @@ func generateHTMLReport(sections []TomlReportSection) error {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return err
 	}
-	const tmplText = `<!DOCTYPE html>
+	const tmplSrc = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
@@ -629,19 +627,13 @@ func generateHTMLReport(sections []TomlReportSection) error {
     tr.unknown-license { background-color: #ffffdd; }
 
     details.copyleft > summary {
-      background-color: #ffdddd;
-      padding: 2px 4px;
-      border-radius: 4px;
+      background-color: #ffdddd; padding: 2px 4px; border-radius: 4px;
     }
     details.unknown-license > summary {
-      background-color: #ffffdd;
-      padding: 2px 4px;
-      border-radius: 4px;
+      background-color: #ffffdd; padding: 2px 4px; border-radius: 4px;
     }
     details.non-copyleft > summary {
-      background-color: #ddffdd;
-      padding: 2px 4px;
-      border-radius: 4px;
+      background-color: #ddffdd; padding: 2px 4px; border-radius: 4px;
     }
   </style>
 </head>
@@ -650,10 +642,10 @@ func generateHTMLReport(sections []TomlReportSection) error {
   {{ range . }}
     <h2>File: {{ .FilePath }}</h2>
     <p>
-      Direct Dependencies: {{ .DirectCount }}<br>
-      Indirect Dependencies: {{ .IndirectCount }}<br>
-      Copyleft Dependencies: {{ .CopyleftCount }}<br>
-      Unknown License Dependencies: {{ .UnknownCount }}
+      <strong>Direct Dependencies:</strong> {{ .DirectCount }}<br>
+      <strong>Indirect Dependencies:</strong> {{ .IndirectCount }}<br>
+      <strong>Copyleft Dependencies:</strong> {{ .CopyleftCount }}<br>
+      <strong>Unknown License Dependencies:</strong> {{ .UnknownCount }}
     </p>
     <h3>Dependency Table</h3>
     <table>
@@ -680,22 +672,22 @@ func generateHTMLReport(sections []TomlReportSection) error {
             <td>{{ $info.Display }}</td>
             <td>{{ $info.Parent }}</td>
             <td>{{ $info.License }}</td>
-            <td><a href="https://www.google.com/search?q={{ $dep }}+license" target="_blank">Search</a></td>
-            <td><a href="https://repo1.maven.org/maven2/{{ $dep }}/{{ $info.Lookup }}" target="_blank">POM?</a></td>
+            <td><a href="https://www.google.com/search?q={{ $dep }}+{{ $info.Lookup }}+license" target="_blank">Search</a></td>
+            <td><a href="https://repo1.maven.org/maven2/{{ $dep }}/{{ $info.Lookup }}" target="_blank">POM Link</a></td>
           </tr>
         {{ end }}
       </tbody>
     </table>
     <h3>Dependency Tree</h3>
-    {{ buildDependencyTreesHTML .DependencyTree }}
+    {{ buildTreesHTML .DependencyTree }}
   {{ end }}
 </body>
 </html>
 `
-	tmpl, err := template.New("reportToml").Funcs(template.FuncMap{
-		"isCopyleft":           isCopyleft,
-		"buildDependencyTreesHTML": buildDependencyTreesHTML,
-	}).Parse(tmplText)
+	tmpl, err := template.New("report").Funcs(template.FuncMap{
+		"buildTreesHTML": buildTreesHTML,
+		"isCopyleft":     isCopyleft,
+	}).Parse(tmplSrc)
 	if err != nil {
 		return err
 	}
@@ -705,10 +697,10 @@ func generateHTMLReport(sections []TomlReportSection) error {
 		return err
 	}
 	defer f.Close()
-	if err := tmpl.Execute(f, sections); err != nil {
-		return err
+	if err2 := tmpl.Execute(f, sections); err2 != nil {
+		return err2
 	}
-	fmt.Printf("✅ TOML license report generated at %s\n", outPath)
+	fmt.Printf("✅ Report generated at %s\n", outPath)
 	return nil
 }
 
@@ -717,7 +709,7 @@ func generateHTMLReport(sections []TomlReportSection) error {
 // ----------------------------------------------------------------------
 
 func main() {
-	// start concurrency
+	// remove any "bytes" import => not used
 	for i := 0; i < pomWorkerCount; i++ {
 		wgWorkers.Add(1)
 		go pomFetchWorker()
@@ -725,28 +717,29 @@ func main() {
 
 	fmt.Println("Starting TOML dependency analysis...")
 
-	tomlFile, err := findTOMLFile(".")
+	tomlPath, err := findTOMLFile(".")
 	if err != nil {
 		fmt.Printf("Error finding TOML file: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Found TOML file at: %s\n", tomlFile)
+	fmt.Printf("Found TOML file at %s\n", tomlPath)
 
-	directDeps, err := parseTOMLFile(tomlFile)
+	directDeps, err := parseTOMLFile(tomlPath)
 	if err != nil {
-		fmt.Printf("Error parsing TOML file: %v\n", err)
+		fmt.Printf("Error parsing TOML: %v\n", err)
 		os.Exit(1)
 	}
-	// single section
+
+	// create single section
 	sections := []TomlReportSection{
 		{
-			FilePath:  tomlFile,
+			FilePath:  tomlPath,
 			DirectDeps: directDeps,
 			AllDeps:   make(map[string]ExtendedDep),
 		},
 	}
 
-	fmt.Println("Starting BFS to build full dependency tree with concurrency...")
+	fmt.Println("Building BFS concurrency for transitive dependencies...")
 	buildTransitiveClosure(sections)
 
 	channelMutex.Lock()
@@ -755,22 +748,20 @@ func main() {
 	close(pomRequests)
 	wgWorkers.Wait()
 
-	// compute summary
+	// compute summary metrics
 	for i := range sections {
 		sec := &sections[i]
 		var directCount, indirectCount, copyleftCount, unknownCount int
-
-		// "direct" = "Parent=direct"
-		for k, inf := range sec.AllDeps {
-			if inf.Parent == "direct" || strings.HasSuffix(k, "@unknown") {
+		for k, info := range sec.AllDeps {
+			if info.Parent == "direct" || strings.HasSuffix(k, "@unknown") {
 				directCount++
 			} else {
 				indirectCount++
 			}
-			if isCopyleft(inf.License) {
+			if isCopyleft(info.License) {
 				copyleftCount++
 			}
-			if inf.License == "Unknown" {
+			if info.License == "Unknown" {
 				unknownCount++
 			}
 		}
@@ -780,11 +771,10 @@ func main() {
 		sec.UnknownCount = unknownCount
 	}
 
-	fmt.Println("Generating HTML report with both parent column and BFS tree...")
+	fmt.Println("Generating HTML report with summary, parent column, BFS tree...")
 	if err := generateHTMLReport(sections); err != nil {
 		fmt.Printf("Error generating HTML: %v\n", err)
 		os.Exit(1)
 	}
-
 	fmt.Println("Analysis complete.")
 }
