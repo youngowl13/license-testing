@@ -35,7 +35,7 @@ jobs:
       # Step 4: Verify the generated report
       - name: Verify Report
         run: |
-          if [ -f ./maven-multi-file-report.html ]; then
+          if [ -f ./license-full-bfs-report.html ]; then
             echo "✅ Maven multi-file report exists!"
           else
             echo "❌ Maven multi-file report is missing!"
@@ -47,5 +47,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: license-report
-          path: ./maven-multi-file-report.html
+          path: ./license-full-bfs-report.html
           retention-days: 7
