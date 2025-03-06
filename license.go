@@ -19,24 +19,27 @@ import (
 )
 
 // ----------------------------------------------------------------------
-// 1) GLOBAL CONFIG + CONCURRENCY
+// 1) GLOBAL CONFIG + WORKER POOL
 // ----------------------------------------------------------------------
 
 const (
-	workerCount   = 5
-	fetchTimeout  = 30 * time.Second
+	workerCount  = 5
+	fetchTimeout = 20 * time.Second
 )
 
 var (
 	pomRequests  = make(chan fetchRequest, 50)
 	wgWorkers    sync.WaitGroup
-	pomCache     sync.Map
+	pomCache     sync.Map // concurrency for storing *MavenPOM by G:A:V
+
+	// BFS expansions cache: key = "g:a:v", value = *BFSNode
+	bfsExpansions sync.Map
 
 	channelOpen  = true
 	channelMutex sync.Mutex
 )
 
-// Used for BFS concurrency
+// fetch concurrency
 type fetchRequest struct {
 	GroupID    string
 	ArtifactID string
@@ -48,7 +51,7 @@ type fetchResult struct {
 	Err error
 }
 
-// Worker routine fetching .pom from remote
+// Worker routine
 func pomWorker() {
 	defer wgWorkers.Done()
 	for req := range pomRequests {
@@ -61,7 +64,7 @@ func pomWorker() {
 // 2) LICENSE DETECTION + SORT
 // ----------------------------------------------------------------------
 
-// Minimal SPDx map for demonstration
+// minimal SPDx map
 var spdxLicenseMap = map[string]struct {
 	Name     string
 	Copyleft bool
@@ -71,16 +74,16 @@ var spdxLicenseMap = map[string]struct {
 	"GPL-3.0":    {Name: "GNU GPL v3.0", Copyleft: true},
 }
 
-// isCopyleft => SPDx or fallback keywords
-func isCopyleft(license string) bool {
+func isCopyleft(lic string) bool {
+	// 1) SPDx direct
 	for spdxID, data := range spdxLicenseMap {
-		if data.Copyleft && (strings.EqualFold(license, data.Name) ||
-			strings.EqualFold(license, spdxID)) {
+		if data.Copyleft && (strings.EqualFold(lic, data.Name) || strings.EqualFold(lic, spdxID)) {
 			return true
 		}
 	}
+	// 2) fallback
 	keywords := []string{"GPL", "AGPL", "LGPL", "Affero", "MPL", "EPL"}
-	up := strings.ToUpper(license)
+	up := strings.ToUpper(lic)
 	for _, k := range keywords {
 		if strings.Contains(up, k) {
 			return true
@@ -89,7 +92,7 @@ func isCopyleft(license string) bool {
 	return false
 }
 
-// getLicenseGroup => for final table sorting: copyleft=1, unknown=2, else=3
+// for final table: copyleft=1, unknown=2, else=3
 func getLicenseGroup(lic string) int {
 	if isCopyleft(lic) {
 		return 1
@@ -100,7 +103,7 @@ func getLicenseGroup(lic string) int {
 }
 
 // ----------------------------------------------------------------------
-// 3) MAVEN POM + BFS
+// 3) MAVEN POM struct + concurrency BFS
 // ----------------------------------------------------------------------
 
 type POMDep struct {
@@ -117,11 +120,9 @@ type MavenPOM struct {
 	Licenses []struct {
 		Name string `xml:"name"`
 	} `xml:"licenses>license"`
-
 	Dependencies []POMDep `xml:"dependencies>dependency"`
 }
 
-// skip test/provided/system/optional
 func skipScope(scope, optional string) bool {
 	s := strings.ToLower(strings.TrimSpace(scope))
 	if s == "test" || s == "provided" || s == "system" {
@@ -133,12 +134,11 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-// detectLicense => naive approach
-func detectLicense(pom *MavenPOM) string {
-	if len(pom.Licenses) == 0 {
+func detectLicense(m *MavenPOM) string {
+	if len(m.Licenses) == 0 {
 		return "Unknown"
 	}
-	lic := strings.TrimSpace(pom.Licenses[0].Name)
+	lic := strings.TrimSpace(m.Licenses[0].Name)
 	if lic == "" {
 		return "Unknown"
 	}
@@ -152,19 +152,7 @@ func detectLicense(pom *MavenPOM) string {
 	return lic
 }
 
-// BFS node, storing sub-children
-type BFSNode struct {
-	Name     string
-	Version  string
-	License  string
-	Copyleft bool
-	Parent   string
-	TopLevel string
-
-	Children []*BFSNode
-}
-
-// fetch from remote => concurrency BFS
+// concurrency BFS fetch
 func concurrentFetchPOM(g, a, v string) (*MavenPOM, error) {
 	key := fmt.Sprintf("%s:%s:%s", g, a, v)
 	if c, ok := pomCache.Load(key); ok {
@@ -174,6 +162,7 @@ func concurrentFetchPOM(g, a, v string) (*MavenPOM, error) {
 	open := channelOpen
 	channelMutex.Unlock()
 	if !open {
+		// fallback fetch
 		p, e := fetchRemotePOM(g, a, v)
 		if e == nil && p != nil {
 			pomCache.Store(key, p)
@@ -189,11 +178,10 @@ func concurrentFetchPOM(g, a, v string) (*MavenPOM, error) {
 	return res.POM, res.Err
 }
 
-// fetchRemotePOM => tries maven central, google
 func fetchRemotePOM(g, a, v string) (*MavenPOM, error) {
-	gpath := strings.ReplaceAll(g, ".", "/")
-	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", gpath, a, v, a, v)
-	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", gpath, a, v, a, v)
+	groupPath := strings.ReplaceAll(g, ".", "/")
+	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
+	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
 
 	if pm, e := fetchPOMFromURL(urlC); e == nil && pm != nil {
 		return pm, nil
@@ -203,6 +191,7 @@ func fetchRemotePOM(g, a, v string) (*MavenPOM, error) {
 	}
 	return nil, fmt.Errorf("cannot fetch remote POM for %s:%s:%s", g, a, v)
 }
+
 func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	cl := http.Client{Timeout: fetchTimeout}
 	resp, err := cl.Get(url)
@@ -226,31 +215,31 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	return &pom, nil
 }
 
-// fallbackVersionIfUnknown => if version=unknown => fetchLatest
-func fallbackVersionIfUnknown(g, a, orig string) (string, error) {
-	if strings.ToLower(orig) != "unknown" {
-		return orig, nil
+// fallbackVersionIfUnknown => if "unknown" => getLatestVersion
+func fallbackVersionIfUnknown(g, a, ver string) (string, error) {
+	if strings.ToLower(ver) != "unknown" {
+		return ver, nil
 	}
-	latest, err := getLatestVersion(g, a)
+	lat, err := getLatestVersion(g, a)
 	if err != nil {
 		return "unknown", err
 	}
-	return latest, nil
+	return lat, nil
 }
 
-// getLatestVersion => tries central, google
 func getLatestVersion(g, a string) (string, error) {
-	gpath := strings.ReplaceAll(g, ".", "/")
-	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/maven-metadata.xml", gpath, a)
+	groupPath := strings.ReplaceAll(g, ".", "/")
+	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/maven-metadata.xml", groupPath, a)
 	if v, e := fetchLatestVersionFromURL(urlC); e == nil && v != "" {
 		return v, nil
 	}
-	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/maven-metadata.xml", gpath, a)
+	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/maven-metadata.xml", groupPath, a)
 	if v2, e2 := fetchLatestVersionFromURL(urlG); e2 == nil && v2 != "" {
 		return v2, nil
 	}
 	return "", fmt.Errorf("cannot find latest for %s:%s", g, a)
 }
+
 func fetchLatestVersionFromURL(url string) (string, error) {
 	cl := http.Client{Timeout: 15 * time.Second}
 	resp, err := cl.Get(url)
@@ -286,43 +275,62 @@ func fetchLatestVersionFromURL(url string) (string, error) {
 	if len(md.Versioning.Versions) > 0 {
 		return md.Versioning.Versions[len(md.Versioning.Versions)-1], nil
 	}
-	return "", fmt.Errorf("no version found in %s", url)
+	return "", fmt.Errorf("no version found in metadata at %s", url)
 }
 
-// BFS expansions => no depth limit
-func doFullBFS(g, a, v, parent, top string, visited map[string]bool) *BFSNode {
+// BFS expansions cache => "g:a:v" => BFSNode pointer
+// We'll store the BFS expansions so we don't re-run expansions for the same G:A:V
+type BFSNode struct {
+	Name     string // "group/artifact"
+	Version  string
+	License  string
+	Copyleft bool
+	Parent   string
+	TopLevel string
+
+	Children []*BFSNode
+}
+
+func buildFullBFS(g, a, v, parent, top string, visited map[string]bool) *BFSNode {
 	key := fmt.Sprintf("%s/%s@%s", g, a, v)
+	// cycle detection
 	if visited[key] {
 		return nil
 	}
 	visited[key] = true
 
-	eff, e2 := fallbackVersionIfUnknown(g, a, v)
-	if e2 != nil {
-		// remain unknown
-		return &BFSNode{
-			Name:  g + "/" + a,
-			Version: v,
-			License: "Unknown",
-			Parent: parent,
-			TopLevel: top,
-		}
+	// BFS expansions cache
+	if cached, ok := bfsExpansions.Load(key); ok {
+		// but the BFSNode might have a different parent/top?
+		// We'll clone or re-parent it
+		orig := cached.(*BFSNode)
+		clone := cloneBFSNode(orig)
+		clone.Parent = parent
+		clone.TopLevel = top
+		return clone
 	}
+
+	// if "unknown", fallback to latest
+	eff, e2 := fallbackVersionIfUnknown(g, a, v)
 	pom, err := concurrentFetchPOM(g, a, eff)
 	node := &BFSNode{
 		Name:   g + "/" + a,
 		Version: eff,
 		Parent: parent,
 		TopLevel: top,
-		License: "Unknown", // default
+		License: "Unknown",
 	}
-	if err != nil || pom == nil {
+	if e2 != nil || err != nil || pom == nil {
+		// store partial in expansions
+		bfsExpansions.Store(key, node)
 		return node
 	}
 	lic := detectLicense(pom)
 	node.License = lic
 	node.Copyleft = isCopyleft(lic)
+
 	// BFS children
+	var kids []*BFSNode
 	for _, d := range pom.Dependencies {
 		if skipScope(d.Scope, d.Optional) {
 			continue
@@ -333,19 +341,34 @@ func doFullBFS(g, a, v, parent, top string, visited map[string]bool) *BFSNode {
 		if v2 == "" {
 			v2 = "unknown"
 		}
-		child := doFullBFS(g2, a2, v2, g+"/"+a+":"+eff, top, visited)
+		child := buildFullBFS(g2, a2, v2, g+"/"+a+":"+eff, top, visited)
 		if child != nil {
-			node.Children = append(node.Children, child)
+			kids = append(kids, child)
 		}
 	}
+	node.Children = kids
+	bfsExpansions.Store(key, node)
 	return node
 }
 
-// produce BFS expansions in <details>
-func buildBFSHTML(n *BFSNode) string {
-	if n == nil {
-		return ""
+func cloneBFSNode(orig *BFSNode) *BFSNode {
+	n2 := &BFSNode{
+		Name: orig.Name,
+		Version: orig.Version,
+		License: orig.License,
+		Copyleft: orig.Copyleft,
+		Children: nil, // we will clone children
 	}
+	// We do NOT copy parent/top from the orig, because BFS expansions might differ
+	for _, c := range orig.Children {
+		cc := cloneBFSNode(c)
+		n2.Children = append(n2.Children, cc)
+	}
+	return n2
+}
+
+// expansions => <details>
+func buildBFSHTML(n *BFSNode) string {
 	sum := fmt.Sprintf("%s@%s (License: %s)", n.Name, n.Version, n.License)
 	cls := "non-copyleft"
 	if n.License == "Unknown" {
@@ -370,39 +393,42 @@ func buildBFSHTML(n *BFSNode) string {
 	return sb.String()
 }
 
-// Flatten BFS => final table
+// flatten BFS => final table
 type FlatDep struct {
 	Name     string
 	Version  string
 	License  string
 	Parent   string
 	TopLevel string
+	Copyleft bool
 	Language string
 
 	RepoInfo string
 }
 
-func flattenBFS(n *BFSNode, lang string, out *[]FlatDep) {
+func flattenBFSNode(n *BFSNode, lang string, out *[]FlatDep) {
 	if n == nil {
 		return
 	}
 	g, a := splitGA(n.Name)
-	link := buildRepoInfoLink(g, a, n.Version)
+	repo := buildRepoLink(g, a, n.Version)
 	fd := FlatDep{
-		Name:   n.Name,
-		Version: n.Version,
-		License: n.License,
-		Parent: n.Parent,
+		Name:     n.Name,
+		Version:  n.Version,
+		License:  n.License,
+		Parent:   n.Parent,
 		TopLevel: n.TopLevel,
+		Copyleft: n.Copyleft,
 		Language: lang,
-		RepoInfo: link,
+		RepoInfo: repo,
 	}
 	*out = append(*out, fd)
 	for _, c := range n.Children {
-		flattenBFS(c, lang, out)
+		flattenBFSNode(c, lang, out)
 	}
 }
-func buildRepoInfoLink(g, a, v string) string {
+
+func buildRepoLink(g, a, v string) string {
 	if g == "" || a == "" {
 		q := g + " " + a + " " + v
 		return "https://www.google.com/search?q=" + strings.ReplaceAll(q, " ", "+")
@@ -411,11 +437,53 @@ func buildRepoInfoLink(g, a, v string) string {
 		a, g, a, v)
 }
 
+func splitGA(ga string) (string, string) {
+	p := strings.SplitN(ga, "/", 2)
+	if len(p) != 2 {
+		return "", ""
+	}
+	return p[0], p[1]
+}
+
+// BFS expansions for direct dependencies
+type BFSSection struct {
+	FilePath  string
+	BFSNodes  []*BFSNode
+	Flattened []FlatDep
+}
+
+// doBFSForDirect => for each direct G/A => BFS expansions => flatten
+func doBFSForDirect(depMap map[string]string, topFile, lang string) BFSSection {
+	visited := make(map[string]bool)
+	var roots []*BFSNode
+	for ga, ver := range depMap {
+		g, a := splitGA(ga)
+		node := buildFullBFS(g, a, ver, "direct", ga, visited)
+		if node != nil {
+			roots = append(roots, node)
+		}
+	}
+	var flat []FlatDep
+	for _, r := range roots {
+		flattenBFSNode(r, lang, &flat)
+	}
+	// sort
+	sort.SliceStable(flat, func(i, j int) bool {
+		gi := getLicenseGroup(flat[i].License)
+		gj := getLicenseGroup(flat[j].License)
+		return gi < gj
+	})
+	return BFSSection{
+		FilePath:  topFile,
+		BFSNodes:  roots,
+		Flattened: flat,
+	}
+}
+
 // ----------------------------------------------------------------------
-// 6) parse poms => BFS, parse toml => BFS, parse gradle => BFS
+// 4) PARSE + BFS expansions for POM, TOML, Gradle
 // ----------------------------------------------------------------------
 
-// 6a) findAllPOMFiles
 func findAllPOMFiles(root string) ([]string, error) {
 	var out []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, e error) error {
@@ -453,7 +521,6 @@ func parseOnePomFile(filePath string) (map[string]string, error) {
 	return res, nil
 }
 
-// 6b) findTOMLFile
 func findTOMLFile(root string) ([]string, error) {
 	var out []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, e error) error {
@@ -478,7 +545,7 @@ func parseOneTomlFile(filePath string) (map[string]string, error) {
 	}
 	libTree, ok := libObj.(*toml.Tree)
 	if !ok {
-		return nil, fmt.Errorf("'libraries' not a valid table in %s", filePath)
+		return nil, fmt.Errorf("'libraries' not valid in %s", filePath)
 	}
 	res := make(map[string]string)
 	for _, k := range libTree.Keys() {
@@ -504,7 +571,6 @@ func parseOneTomlFile(filePath string) (map[string]string, error) {
 	return res, nil
 }
 
-// 6c) findBuildGradleFiles
 func findBuildGradleFiles(root string) ([]string, error) {
 	var out []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, e error) error {
@@ -546,41 +612,7 @@ func parseOneGradleFile(filePath string) (map[string]string, error) {
 }
 
 // ----------------------------------------------------------------------
-// 7) For each file => BFS expansions => flatten => final HTML
-// ----------------------------------------------------------------------
-
-type BFSResult struct {
-	FilePath  string
-	BFSNodes  []*BFSNode
-	Flattened []FlatDep
-}
-
-func doBFSForDirectDeps(depMap map[string]string, topKey, lang string) BFSResult {
-	visited := make(map[string]bool)
-	var nodes []*BFSNode
-	for ga, ver := range depMap {
-		g, a := splitGA(ga)
-		node := doFullBFS(g, a, ver, "direct", ga, visited)
-		if node != nil {
-			nodes = append(nodes, node)
-		}
-	}
-	// flatten
-	var flat []FlatDep
-	for _, n := range nodes {
-		flattenBFS(n, lang, &flat)
-	}
-	// sort
-	sort.SliceStable(flat, func(i, j int) bool {
-		gi := getLicenseGroup(flat[i].License)
-		gj := getLicenseGroup(flat[j].License)
-		return gi < gj
-	})
-	return BFSResult{FilePath: topKey, BFSNodes: nodes, Flattened: flat}
-}
-
-// ----------------------------------------------------------------------
-// 8) FINAL HTML
+// 5) FINAL HTML
 // ----------------------------------------------------------------------
 
 var finalTemplate = `
@@ -603,12 +635,13 @@ summary{cursor:pointer;font-weight:bold}
 </style>
 </head>
 <body>
-<h1>Full BFS License Report</h1>
+<h1>Full BFS License Report (with caching)</h1>
 <h2>Summary</h2>
 <p>{{.Summary}}</p>
 
+<h2>POM Results</h2>
 {{range .PomSections}}
-<h2>POM Dependencies (from: {{.FilePath}})</h2>
+<h3>File: {{.FilePath}}</h3>
 {{if eq (len .Flattened) 0}}
 <p>No dependencies found in this file.</p>
 {{else}}
@@ -636,7 +669,7 @@ summary{cursor:pointer;font-weight:bold}
 </tr>
 {{end}}
 </table>
-<h3>BFS Expansions</h3>
+<h4>BFS Expansions</h4>
 <div>
 {{range .BFSNodes}}
 {{buildBFSHTML .}}
@@ -646,8 +679,9 @@ summary{cursor:pointer;font-weight:bold}
 {{end}}
 {{end}}
 
+<h2>TOML Results</h2>
 {{range .TomlSections}}
-<h2>TOML Dependencies (from: {{.FilePath}})</h2>
+<h3>File: {{.FilePath}}</h3>
 {{if eq (len .Flattened) 0}}
 <p>No dependencies found in this file.</p>
 {{else}}
@@ -675,7 +709,7 @@ summary{cursor:pointer;font-weight:bold}
 </tr>
 {{end}}
 </table>
-<h3>BFS Expansions</h3>
+<h4>BFS Expansions</h4>
 <div>
 {{range .BFSNodes}}
 {{buildBFSHTML .}}
@@ -685,8 +719,9 @@ summary{cursor:pointer;font-weight:bold}
 {{end}}
 {{end}}
 
+<h2>Gradle Results</h2>
 {{range .GradleSections}}
-<h2>Gradle Dependencies (from: {{.FilePath}})</h2>
+<h3>File: {{.FilePath}}</h3>
 {{if eq (len .Flattened) 0}}
 <p>No dependencies found in this file.</p>
 {{else}}
@@ -714,7 +749,7 @@ summary{cursor:pointer;font-weight:bold}
 </tr>
 {{end}}
 </table>
-<h3>BFS Expansions</h3>
+<h4>BFS Expansions</h4>
 <div>
 {{range .BFSNodes}}
 {{buildBFSHTML .}}
@@ -728,81 +763,69 @@ summary{cursor:pointer;font-weight:bold}
 </html>
 `
 
-// For final template expansions
-func buildBFSHTMLFunc(n *BFSNode) template.HTML {
-	return template.HTML(buildBFSHTML(n))
-}
-
-// Structs for final data
 type BFSSection struct {
 	FilePath  string
 	BFSNodes  []*BFSNode
 	Flattened []FlatDep
 }
-type finalOutput struct {
-	Summary      string
-	PomSections  []BFSSection
-	TomlSections []BFSSection
-	GradleSections []BFSSection
+
+func buildBFSHTMLFunc(n *BFSNode) template.HTML {
+	return template.HTML(buildBFSHTML(n))
 }
 
-// main
 func main() {
-	// 1) concurrency
+	// 1) start concurrency
 	for i := 0; i < workerCount; i++ {
 		wgWorkers.Add(1)
 		go pomWorker()
 	}
 
-	// 2) POM
+	// 2) parse poms
 	pomFiles, _ := findAllPOMFiles(".")
 	var pomSecs []BFSSection
 	var totalPom int
 	for _, pf := range pomFiles {
 		depMap, err := parseOnePomFile(pf)
 		if err != nil {
-			fmt.Printf("Error parse POM: %s => %v\n", pf, err)
+			fmt.Printf("Error parse POM => %s: %v\n", pf, err)
 			continue
 		}
-		res := doBFSForDirectDeps(depMap, pf, "maven")
-		res.FilePath = pf
-		totalPom += len(res.Flattened)
-		pomSecs = append(pomSecs, res)
+		sec := doBFSForDirect(depMap, pf, "maven")
+		pomSecs = append(pomSecs, sec)
+		totalPom += len(sec.Flattened)
 	}
 
-	// 3) TOML
+	// 3) parse tomls
 	tomlFiles, _ := findTOMLFile(".")
 	var tomlSecs []BFSSection
 	var totalToml int
 	for _, tf := range tomlFiles {
 		depMap, err := parseOneTomlFile(tf)
 		if err != nil {
-			fmt.Printf("Error parse TOML: %s => %v\n", tf, err)
+			fmt.Printf("Error parse TOML => %s: %v\n", tf, err)
 			continue
 		}
-		res := doBFSForDirectDeps(depMap, tf, "toml")
-		res.FilePath = tf
-		totalToml += len(res.Flattened)
-		tomlSecs = append(tomlSecs, res)
+		sec := doBFSForDirect(depMap, tf, "toml")
+		tomlSecs = append(tomlSecs, sec)
+		totalToml += len(sec.Flattened)
 	}
 
-	// 4) Gradle
+	// 4) parse gradle
 	gradleFiles, _ := findBuildGradleFiles(".")
 	var gradleSecs []BFSSection
 	var totalGradle int
 	for _, gf := range gradleFiles {
 		depMap, err := parseOneGradleFile(gf)
 		if err != nil {
-			fmt.Printf("Error parse Gradle: %s => %v\n", gf, err)
+			fmt.Printf("Error parse Gradle => %s: %v\n", gf, err)
 			continue
 		}
-		res := doBFSForDirectDeps(depMap, gf, "gradle")
-		res.FilePath = gf
-		totalGradle += len(res.Flattened)
-		gradleSecs = append(gradleSecs, res)
+		sec := doBFSForDirect(depMap, gf, "gradle")
+		gradleSecs = append(gradleSecs, sec)
+		totalGradle += len(sec.Flattened)
 	}
 
-	// concurrency close
+	// close concurrency
 	channelMutex.Lock()
 	channelOpen = false
 	channelMutex.Unlock()
@@ -811,45 +834,45 @@ func main() {
 
 	// count copyleft
 	copyleftCount := 0
-	for _, sec := range pomSecs {
-		for _, f := range sec.Flattened {
+	for _, s := range pomSecs {
+		for _, f := range s.Flattened {
 			if isCopyleft(f.License) {
 				copyleftCount++
 			}
 		}
 	}
-	for _, sec := range tomlSecs {
-		for _, f := range sec.Flattened {
+	for _, s := range tomlSecs {
+		for _, f := range s.Flattened {
 			if isCopyleft(f.License) {
 				copyleftCount++
 			}
 		}
 	}
-	for _, sec := range gradleSecs {
-		for _, f := range sec.Flattened {
+	for _, s := range gradleSecs {
+		for _, f := range s.Flattened {
 			if isCopyleft(f.License) {
 				copyleftCount++
 			}
 		}
 	}
+
 	summary := fmt.Sprintf("POM total: %d, TOML total: %d, Gradle total: %d, Copyleft: %d",
 		totalPom, totalToml, totalGradle, copyleftCount)
 
 	data := struct {
-		Summary      string
-		PomSections  []BFSSection
-		TomlSections []BFSSection
+		Summary       string
+		PomSections   []BFSSection
+		TomlSections  []BFSSection
 		GradleSections []BFSSection
 	}{
-		summary,
-		pomSecs,
-		tomlSecs,
-		gradleSecs,
+		Summary: summary,
+		PomSections: pomSecs,
+		TomlSections: tomlSecs,
+		GradleSections: gradleSecs,
 	}
 
-	// 5) Render
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
-		"isCopyleft": isCopyleft,
+		"isCopyleft":   isCopyleft,
 		"buildBFSHTML": buildBFSHTMLFunc,
 	}).Parse(finalTemplate)
 	if err != nil {
@@ -867,5 +890,5 @@ func main() {
 		fmt.Println("Template exec error =>", e3)
 		return
 	}
-	fmt.Println("license-full-bfs-report.html generated with full BFS expansions!")
+	fmt.Println("license-full-bfs-report.html generated successfully with BFS caching!")
 }
