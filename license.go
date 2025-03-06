@@ -19,7 +19,7 @@ import (
 )
 
 // ----------------------------------------------------------------------
-// 1) GLOBAL CONFIG AND WORKER POOL
+// 1) GLOBAL CONFIG & WORKER POOL
 // ----------------------------------------------------------------------
 
 const (
@@ -37,45 +37,65 @@ var (
 	channelMutex sync.Mutex
 )
 
+// fetchRequest and fetchResult for concurrency
+type fetchRequest struct {
+	GroupID    string
+	ArtifactID string
+	Version    string
+	ResultChan chan fetchResult
+}
+
+type fetchResult struct {
+	POM *MavenPOM
+	Err error
+}
+
+func pomWorker() {
+	defer wgWorkers.Done()
+	for req := range pomRequests {
+		pom, err := fetchRemotePOM(req.GroupID, req.ArtifactID, req.Version)
+		req.ResultChan <- fetchResult{pom, err}
+	}
+}
+
 // ----------------------------------------------------------------------
-// 2) LICENSE DETECTION (Comprehensive Copyleft)
+// 2) LICENSE DETECTION
 // ----------------------------------------------------------------------
 
-// SPDx map with both short and full forms
+// Comprehensive SPDx map with both short and full forms
 var spdxLicenseMap = map[string]struct {
 	Name     string
 	Copyleft bool
 }{
-	"MIT":                            {Name: "MIT License", Copyleft: false},
-	"Apache-2.0":                     {Name: "Apache License 2.0", Copyleft: false},
-	"BSD-2-CLAUSE":                   {Name: "BSD 2-Clause", Copyleft: false},
-	"BSD-3-CLAUSE":                   {Name: "BSD 3-Clause", Copyleft: false},
-	"GPL":                            {Name: "GNU General Public License", Copyleft: true},
-	"GNU GENERAL PUBLIC LICENSE":     {Name: "GNU General Public License", Copyleft: true},
-	"LGPL":                           {Name: "GNU Lesser General Public License", Copyleft: true},
+	"MIT":                              {Name: "MIT License", Copyleft: false},
+	"Apache-2.0":                       {Name: "Apache License 2.0", Copyleft: false},
+	"BSD-2-CLAUSE":                     {Name: "BSD 2-Clause", Copyleft: false},
+	"BSD-3-CLAUSE":                     {Name: "BSD 3-Clause", Copyleft: false},
+	"GPL":                              {Name: "GNU General Public License", Copyleft: true},
+	"GNU GENERAL PUBLIC LICENSE":       {Name: "GNU General Public License", Copyleft: true},
+	"LGPL":                             {Name: "GNU Lesser General Public License", Copyleft: true},
 	"GNU LESSER GENERAL PUBLIC LICENSE": {Name: "GNU Lesser General Public License", Copyleft: true},
-	"AGPL":                           {Name: "GNU Affero General Public License", Copyleft: true},
+	"AGPL":                             {Name: "GNU Affero General Public License", Copyleft: true},
 	"GNU AFFERO GENERAL PUBLIC LICENSE": {Name: "GNU Affero General Public License", Copyleft: true},
-	"MPL":                            {Name: "Mozilla Public License", Copyleft: true},
-	"MOZILLA PUBLIC LICENSE":         {Name: "Mozilla Public License", Copyleft: true},
-	"CC-BY-SA":                       {Name: "Creative Commons Attribution-ShareAlike", Copyleft: true},
-	"EPL":                            {Name: "Eclipse Public License", Copyleft: true},
-	"OFL":                            {Name: "Open Font License", Copyleft: true},
-	"CPL":                            {Name: "Common Public License", Copyleft: true},
-	"OSL":                            {Name: "Open Software License", Copyleft: true},
-	"CDDL":                           {Name: "Common Development and Distribution License", Copyleft: true},
-	"EUPL":                           {Name: "European Union Public License", Copyleft: true},
+	"MPL":                              {Name: "Mozilla Public License", Copyleft: true},
+	"MOZILLA PUBLIC LICENSE":           {Name: "Mozilla Public License", Copyleft: true},
+	"CC-BY-SA":                         {Name: "Creative Commons Attribution-ShareAlike", Copyleft: true},
+	"EPL":                              {Name: "Eclipse Public License", Copyleft: true},
+	"OFL":                              {Name: "Open Font License", Copyleft: true},
+	"CPL":                              {Name: "Common Public License", Copyleft: true},
+	"OSL":                              {Name: "Open Software License", Copyleft: true},
+	"CDDL":                             {Name: "Common Development and Distribution License", Copyleft: true},
+	"EUPL":                             {Name: "European Union Public License", Copyleft: true},
 }
 
 func isCopyleft(license string) bool {
-	// Check SPDx table first
+	// Check SPDx map first
 	for spdxID, data := range spdxLicenseMap {
-		if data.Copyleft && (strings.EqualFold(license, data.Name) ||
-			strings.EqualFold(license, spdxID)) {
+		if data.Copyleft && (strings.EqualFold(license, data.Name) || strings.EqualFold(license, spdxID)) {
 			return true
 		}
 	}
-	// Fallback keywords – include both short and full forms
+	// Fallback: check a list of keywords (short and full forms)
 	fallbackKeywords := []string{
 		"GPL", "GNU GENERAL PUBLIC LICENSE",
 		"LGPL", "GNU LESSER GENERAL PUBLIC LICENSE",
@@ -126,7 +146,7 @@ func detectLicense(p *MavenPOM) string {
 }
 
 // ----------------------------------------------------------------------
-// 3) MAVEN POM STRUCTURES AND FETCHING
+// 3) MAVEN POM FETCHING FUNCTIONS
 // ----------------------------------------------------------------------
 
 type POMDep struct {
@@ -175,11 +195,11 @@ func fetchRemotePOM(g, a, v string) (*MavenPOM, error) {
 	groupPath := strings.ReplaceAll(g, ".", "/")
 	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
 	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
-	if p, e := fetchPOMFromURL(urlC); e == nil && p != nil {
+	if p, err := fetchPOMFromURL(urlC); err == nil && p != nil {
 		return p, nil
 	}
-	if p2, e2 := fetchPOMFromURL(urlG); e2 == nil && p2 != nil {
-		return p2, nil
+	if p, err := fetchPOMFromURL(urlG); err == nil && p != nil {
+		return p, nil
 	}
 	return nil, fmt.Errorf("cannot fetch remote POM for %s:%s:%s", g, a, v)
 }
@@ -201,8 +221,8 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	var pom MavenPOM
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = false
-	if e := dec.Decode(&pom); e != nil {
-		return nil, e
+	if err := dec.Decode(&pom); err != nil {
+		return nil, err
 	}
 	return &pom, nil
 }
@@ -225,12 +245,12 @@ func fallbackVersionIfUnknown(g, a, orig string) (string, error) {
 func getLatestVersion(g, a string) (string, error) {
 	groupPath := strings.ReplaceAll(g, ".", "/")
 	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/maven-metadata.xml", groupPath, a)
-	if v, e := fetchLatestVersionFromURL(urlC); e == nil && v != "" {
+	if v, err := fetchLatestVersionFromURL(urlC); err == nil && v != "" {
 		return v, nil
 	}
 	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/maven-metadata.xml", groupPath, a)
-	if v2, e2 := fetchLatestVersionFromURL(urlG); e2 == nil && v2 != "" {
-		return v2, nil
+	if v, err := fetchLatestVersionFromURL(urlG); err == nil && v != "" {
+		return v, nil
 	}
 	return "", fmt.Errorf("cannot find latest for %s:%s", g, a)
 }
@@ -258,8 +278,8 @@ func fetchLatestVersionFromURL(url string) (string, error) {
 		Versioning Versioning `xml:"versioning"`
 	}
 	var md Metadata
-	if e := xml.Unmarshal(data, &md); e != nil {
-		return "", e
+	if err := xml.Unmarshal(data, &md); err != nil {
+		return "", err
 	}
 	if md.Versioning.Release != "" {
 		return md.Versioning.Release, nil
@@ -294,7 +314,7 @@ func buildRepoLink(g, a, v string) string {
 }
 
 // ----------------------------------------------------------------------
-// 6) BFS NODE TYPE AND FUNCTIONS (with caching)
+// 6) BFS NODE AND FULL BFS WITH CACHING
 // ----------------------------------------------------------------------
 
 type BFSNode struct {
@@ -315,7 +335,6 @@ func buildFullBFS(g, a, v, parent, top string, visited map[string]bool) *BFSNode
 	}
 	visited[key] = true
 
-	// Check BFS cache
 	if cached, ok := bfsCache.Load(key); ok {
 		orig := cached.(*BFSNode)
 		clone := cloneBFSNode(orig)
@@ -424,7 +443,7 @@ func flattenBFSNode(n *BFSNode, lang string, out *[]FlatDep) {
 }
 
 // ----------------------------------------------------------------------
-// 7) FINAL FLAT DEP STRUCTURE AND BFSSection
+// 7) FINAL FLAT DEP STRUCTURE & BFSSection (declare once)
 // ----------------------------------------------------------------------
 
 type FlatDep struct {
@@ -444,33 +463,24 @@ type BFSSection struct {
 	Flattened []FlatDep
 }
 
-// doBFSForDirect processes a map of direct dependencies into a BFSSection.
-func doBFSForDirect(depMap map[string]string, filePath, lang string) BFSSection {
-	visited := make(map[string]bool)
-	var roots []*BFSNode
-	for ga, ver := range depMap {
-		g, a := splitGA(ga)
-		node := buildFullBFS(g, a, ver, "direct", ga, visited)
-		if node != nil {
-			roots = append(roots, node)
-		}
-	}
-	var flat []FlatDep
-	for _, n := range roots {
-		flattenBFSNode(n, lang, &flat)
-	}
-	sort.SliceStable(flat, func(i, j int) bool {
-		return getLicenseGroup(flat[i].License) < getLicenseGroup(flat[j].License)
-	})
-	return BFSSection{
-		FilePath:  filePath,
-		BFSNodes:  roots,
-		Flattened: flat,
-	}
+// ----------------------------------------------------------------------
+// 8) FINAL DATA STRUCTURE FOR REPORT (declare once)
+// ----------------------------------------------------------------------
+
+type finalData struct {
+	Summary        string
+	PomSections    []BFSSection
+	TomlSections   []BFSSection
+	GradleSections []BFSSection
+}
+
+// Helper for template to call buildBFSHTML
+func buildBFSHTMLFunc(n *BFSNode) template.HTML {
+	return template.HTML(buildBFSHTML(n))
 }
 
 // ----------------------------------------------------------------------
-// 8) FILE PARSING FUNCTIONS
+// 9) FILE PARSING FUNCTIONS FOR POM, TOML, GRADLE (declare once)
 // ----------------------------------------------------------------------
 
 // POM
@@ -534,7 +544,7 @@ func parseOneTomlFile(filePath string) (map[string]string, error) {
 	}
 	libTree, ok := libObj.(*toml.Tree)
 	if !ok {
-		return nil, fmt.Errorf("invalid libraries table in %s", filePath)
+		return nil, fmt.Errorf("invalid 'libraries' table in %s", filePath)
 	}
 	res := make(map[string]string)
 	for _, k := range libTree.Keys() {
@@ -600,310 +610,7 @@ func parseOneGradleFile(filePath string) (map[string]string, error) {
 }
 
 // ----------------------------------------------------------------------
-// 9) FINAL DATA STRUCTURES FOR REPORT
-// ----------------------------------------------------------------------
-
-type finalData struct {
-	Summary        string
-	PomSections    []BFSSection
-	TomlSections   []BFSSection
-	GradleSections []BFSSection
-}
-
-// ----------------------------------------------------------------------
-// 10) FINAL HTML TEMPLATE
-// ----------------------------------------------------------------------
-
-var finalTemplate = `
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Full BFS License Report</title>
-<style>
-body { font-family: Arial, sans-serif; margin: 20px; }
-h1, h2 { color: #2c3e50; }
-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-th { background: #f2f2f2; }
-.copyleft { background: #f8d7da; color: #721c24; }
-.unknown { background: #ffff99; color: #333; }
-.non-copyleft { background: #d4edda; color: #155724; }
-details { margin: 4px 0; }
-summary { cursor: pointer; font-weight: bold; }
-</style>
-</head>
-<body>
-<h1>Full BFS License Report</h1>
-<h2>Summary</h2>
-<p>{{.Summary}}</p>
-
-<h2>POM Files</h2>
-{{range .PomSections}}
-  <h3>File: {{.FilePath}}</h3>
-  {{if eq (len .Flattened) 0}}
-    <p>No dependencies found.</p>
-  {{else}}
-    <table>
-      <tr>
-        <th>Name</th>
-        <th>Version</th>
-        <th>License</th>
-        <th>Parent</th>
-        <th>Top-Level</th>
-        <th>Language</th>
-        <th>Maven/Repo Info</th>
-      </tr>
-      {{range .Flattened}}
-      <tr>
-        <td>{{.Name}}</td>
-        <td>{{.Version}}</td>
-        <td class="{{if eq .License "Unknown"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}">{{.License}}</td>
-        <td>{{.Parent}}</td>
-        <td>{{.TopLevel}}</td>
-        <td>{{.Language}}</td>
-        <td><a href="{{.RepoInfo}}" target="_blank">Link</a></td>
-      </tr>
-      {{end}}
-    </table>
-    <h4>BFS Expansions</h4>
-    <div>
-      {{range .BFSNodes}}
-        {{buildBFSHTML .}}
-      {{end}}
-    </div>
-    <hr/>
-  {{end}}
-{{end}}
-
-<h2>TOML Files</h2>
-{{range .TomlSections}}
-  <h3>File: {{.FilePath}}</h3>
-  {{if eq (len .Flattened) 0}}
-    <p>No dependencies found.</p>
-  {{else}}
-    <table>
-      <tr>
-        <th>Name</th>
-        <th>Version</th>
-        <th>License</th>
-        <th>Parent</th>
-        <th>Top-Level</th>
-        <th>Language</th>
-        <th>Maven/Repo Info</th>
-      </tr>
-      {{range .Flattened}}
-      <tr>
-        <td>{{.Name}}</td>
-        <td>{{.Version}}</td>
-        <td class="{{if eq .License "Unknown"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}">{{.License}}</td>
-        <td>{{.Parent}}</td>
-        <td>{{.TopLevel}}</td>
-        <td>{{.Language}}</td>
-        <td><a href="{{.RepoInfo}}" target="_blank">Link</a></td>
-      </tr>
-      {{end}}
-    </table>
-    <h4>BFS Expansions</h4>
-    <div>
-      {{range .BFSNodes}}
-        {{buildBFSHTML .}}
-      {{end}}
-    </div>
-    <hr/>
-  {{end}}
-{{end}}
-
-<h2>Gradle Files</h2>
-{{range .GradleSections}}
-  <h3>File: {{.FilePath}}</h3>
-  {{if eq (len .Flattened) 0}}
-    <p>No dependencies found.</p>
-  {{else}}
-    <table>
-      <tr>
-        <th>Name</th>
-        <th>Version</th>
-        <th>License</th>
-        <th>Parent</th>
-        <th>Top-Level</th>
-        <th>Language</th>
-        <th>Maven/Repo Info</th>
-      </tr>
-      {{range .Flattened}}
-      <tr>
-        <td>{{.Name}}</td>
-        <td>{{.Version}}</td>
-        <td class="{{if eq .License "Unknown"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}">{{.License}}</td>
-        <td>{{.Parent}}</td>
-        <td>{{.TopLevel}}</td>
-        <td>{{.Language}}</td>
-        <td><a href="{{.RepoInfo}}" target="_blank">Link</a></td>
-      </tr>
-      {{end}}
-    </table>
-    <h4>BFS Expansions</h4>
-    <div>
-      {{range .BFSNodes}}
-        {{buildBFSHTML .}}
-      {{end}}
-    </div>
-    <hr/>
-  {{end}}
-{{end}}
-
-</body>
-</html>
-`
-
-// ----------------------------------------------------------------------
-// 10) FINAL DATA STRUCTURES FOR REPORT
-// ----------------------------------------------------------------------
-
-type finalData struct {
-	Summary        string
-	PomSections    []BFSSection
-	TomlSections   []BFSSection
-	GradleSections []BFSSection
-}
-
-// Helper so the template can call buildBFSHTML
-func buildBFSHTMLFunc(n *BFSNode) template.HTML {
-	return template.HTML(buildBFSHTML(n))
-}
-
-// ----------------------------------------------------------------------
-// 11) FILE PARSING FUNCTIONS
-// ----------------------------------------------------------------------
-
-// POM files
-func findAllPOMFiles(root string) ([]string, error) {
-	var out []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.EqualFold(info.Name(), "pom.xml") {
-			out = append(out, path)
-		}
-		return nil
-	})
-	return out, err
-}
-
-func parseOnePomFile(filePath string) (map[string]string, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	var pom MavenPOM
-	if err := xml.Unmarshal(data, &pom); err != nil {
-		return nil, err
-	}
-	res := make(map[string]string)
-	for _, d := range pom.Dependencies {
-		if skipScope(d.Scope, d.Optional) {
-			continue
-		}
-		g := d.GroupID
-		a := d.ArtifactID
-		v := d.Version
-		if v == "" {
-			v = "unknown"
-		}
-		key := g + "/" + a
-		res[key] = v
-	}
-	return res, nil
-}
-
-// TOML files
-func findTOMLFile(root string) ([]string, error) {
-	var out []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".toml") {
-			out = append(out, path)
-		}
-		return nil
-	})
-	return out, err
-}
-
-func parseOneTomlFile(filePath string) (map[string]string, error) {
-	tree, err := toml.LoadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	libObj := tree.Get("libraries")
-	if libObj == nil {
-		return nil, nil
-	}
-	libTree, ok := libObj.(*toml.Tree)
-	if !ok {
-		return nil, fmt.Errorf("invalid 'libraries' table in %s", filePath)
-	}
-	res := make(map[string]string)
-	for _, k := range libTree.Keys() {
-		val := libTree.Get(k)
-		sub, ok := val.(*toml.Tree)
-		if !ok {
-			continue
-		}
-		modStr, _ := sub.Get("module").(string)
-		verRef, _ := sub.Get("version.ref").(string)
-		if modStr == "" || verRef == "" {
-			continue
-		}
-		parts := strings.SplitN(modStr, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		g := parts[0]
-		a := parts[1]
-		key := g + "/" + a
-		res[key] = verRef
-	}
-	return res, nil
-}
-
-// Gradle files
-func findBuildGradleFiles(root string) ([]string, error) {
-	var out []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.EqualFold(info.Name(), "build.gradle") {
-			out = append(out, path)
-		}
-		return nil
-	})
-	return out, err
-}
-
-func parseOneGradleFile(filePath string) (map[string]string, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	content := string(data)
-	re := regexp.MustCompile(`(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|androidTestImplementation|classpath)\s+['"]([^'"]+)['"]`)
-	matches := re.FindAllStringSubmatch(content, -1)
-	res := make(map[string]string)
-	for _, m := range matches {
-		coord := m[2]
-		parts := strings.Split(coord, ":")
-		if len(parts) < 2 {
-			continue
-		}
-		g := parts[0]
-		a := parts[1]
-		v := "unknown"
-		if len(parts) >= 3 {
-			v = parts[2]
-		}
-		key := g + "/" + a
-		res[key] = v
-	}
-	return res, nil
-}
-
-// ----------------------------------------------------------------------
-// 12) BFS FOR DIRECT DEPENDENCIES (Build BFSSection)
+// 10) FINAL REPORT: Build BFSSection from direct dependency maps
 // ----------------------------------------------------------------------
 
 func doBFSForDirect(depMap map[string]string, filePath, lang string) BFSSection {
@@ -931,23 +638,21 @@ func doBFSForDirect(depMap map[string]string, filePath, lang string) BFSSection 
 }
 
 // ----------------------------------------------------------------------
-// 13) FINAL DATA STRUCTURES FOR REPORT
+// 11) FINAL DATA STRUCTURE FOR REPORT (already declared above)
 // ----------------------------------------------------------------------
 
-type finalData struct {
-	Summary        string
-	PomSections    []BFSSection
-	TomlSections   []BFSSection
-	GradleSections []BFSSection
-}
+// finalData is declared above
 
-// Helper function for templates to call buildBFSHTML
+// ----------------------------------------------------------------------
+// 12) TEMPLATE HELPER: buildBFSHTML for templates
+// ----------------------------------------------------------------------
+
 func buildBFSHTMLFunc(n *BFSNode) template.HTML {
 	return template.HTML(buildBFSHTML(n))
 }
 
 // ----------------------------------------------------------------------
-// 14) FINAL HTML TEMPLATE
+// 13) FINAL HTML TEMPLATE
 // ----------------------------------------------------------------------
 
 var finalTemplate = `
@@ -955,7 +660,7 @@ var finalTemplate = `
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Full BFS License Report</title>
+<title>Full BFS License Report With Caching</title>
 <style>
 body { font-family: Arial, sans-serif; margin: 20px; }
 h1, h2 { color: #2c3e50; }
@@ -970,7 +675,7 @@ summary { cursor: pointer; font-weight: bold; }
 </style>
 </head>
 <body>
-<h1>Full BFS License Report</h1>
+<h1>Full BFS License Report With Caching</h1>
 <h2>Summary</h2>
 <p>{{.Summary}}</p>
 
@@ -1093,7 +798,7 @@ summary { cursor: pointer; font-weight: bold; }
 `
 
 // ----------------------------------------------------------------------
-// 12) FINAL DATA COLLECTION FOR REPORT
+// 14) FINAL DATA COLLECTION FOR REPORT
 // ----------------------------------------------------------------------
 
 type finalData struct {
@@ -1104,48 +809,26 @@ type finalData struct {
 }
 
 // ----------------------------------------------------------------------
-// 13) FILE PARSING: POM, TOML, GRADLE
+// 15) FILE PARSING: POM, TOML, GRADLE (declared once)
 // ----------------------------------------------------------------------
 
-func findAllPOMFiles(root string) ([]string, error) {
-	var out []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.EqualFold(info.Name(), "pom.xml") {
-			out = append(out, path)
-		}
-		return nil
-	})
-	return out, err
+// POM
+func findPOMFiles(root string) ([]string, error) {
+	return findAllPOMFiles(root)
 }
 
-func findTOMLFile(root string) ([]string, error) {
-	var out []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".toml") {
-			out = append(out, path)
-		}
-		return nil
-	})
-	return out, err
-}
+// TOML
+// (reuse findTOMLFile)
 
-func findBuildGradleFiles(root string) ([]string, error) {
-	var out []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.EqualFold(info.Name(), "build.gradle") {
-			out = append(out, path)
-		}
-		return nil
-	})
-	return out, err
-}
+// Gradle
+// (reuse findBuildGradleFiles)
 
 // ----------------------------------------------------------------------
-// 14) MAIN FUNCTION
+// 16) MAIN FUNCTION
 // ----------------------------------------------------------------------
 
 func main() {
-	// Start worker pool for fetching POMs
+	// Start worker pool
 	for i := 0; i < workerCount; i++ {
 		wgWorkers.Add(1)
 		go pomWorker()
@@ -1206,7 +889,7 @@ func main() {
 	close(pomRequests)
 	wgWorkers.Wait()
 
-	// Count copyleft
+	// Count copyleft items
 	copyleftCount := 0
 	for _, s := range pomSections {
 		for _, d := range s.Flattened {
@@ -1238,7 +921,6 @@ func main() {
 		GradleSections: gradleSections,
 	}
 
-	// Prepare template functions and render final HTML report
 	funcMap := template.FuncMap{
 		"isCopyleft":   isCopyleft,
 		"buildBFSHTML": buildBFSHTMLFunc,
@@ -1254,6 +936,7 @@ func main() {
 		return
 	}
 	defer f.Close()
+
 	if err := tmpl.Execute(f, finalOut); err != nil {
 		fmt.Println("Template execution error:", err)
 		return
