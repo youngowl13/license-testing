@@ -57,9 +57,7 @@ var spdxLicenseMap = map[string]struct {
 	"AGPL-3.0":     {Name: "GNU Affero GPL v3.0", Copyleft: true},
 }
 
-// ------------------------------------------------------------------------
-// HERE is the missing helper
-// ------------------------------------------------------------------------
+// Additional fallback for sorting
 func getLicenseGroup(license string) int {
 	if isCopyleft(license) {
 		return 1
@@ -88,16 +86,16 @@ type POMDep struct {
 }
 
 type MavenPOM struct {
-	XMLName        xml.Name `xml:"project"`
-	GroupID        string   `xml:"groupId"`
-	ArtifactID     string   `xml:"artifactId"`
-	Version        string   `xml:"version"`
-	Parent         POMParent
-	Licenses       []struct {
+	XMLName         xml.Name `xml:"project"`
+	GroupID         string   `xml:"groupId"`
+	ArtifactID      string   `xml:"artifactId"`
+	Version         string   `xml:"version"`
+	Parent          POMParent
+	Licenses        []struct {
 		Name string `xml:"name"`
 	} `xml:"licenses>license"`
-	Dependencies []POMDep `xml:"dependencies>dependency"`
-	DependencyMgmt struct {
+	Dependencies    []POMDep `xml:"dependencies>dependency"`
+	DependencyMgmt  struct {
 		Dependencies []POMDep `xml:"dependencies>dependency"`
 	} `xml:"dependencyManagement"`
 }
@@ -114,19 +112,11 @@ type fetchResult struct {
 	Err error
 }
 
-func pomFetchWorker() {
-	defer wgWorkers.Done()
-	for req := range pomRequests {
-		pom, err := retrieveOrLoadPOM(req.GroupID, req.ArtifactID, req.Version)
-		req.ResultChan <- fetchResult{pom, err}
-	}
-}
-
 // BFS node for POM/TOML
 type DependencyNode struct {
 	Name            string // group/artifact
 	OriginalVersion string // from source file (could be "unknown")
-	EffectiveVer    string // actual version used for BFS (maybe "latest")
+	EffectiveVer    string // actual version used for BFS
 	License         string
 	Copyleft        bool
 	Parent          string
@@ -150,15 +140,18 @@ type GradleDependencyNode struct {
 	SourceLink string
 }
 
-// For final table
+// For final table, we add two new columns: DownloadPOM, RepoInfoURL.
 type FlatDep struct {
 	Name     string
 	Version  string
 	License  string
-	Details  string
+	Details  string // existing "Details" column
 	Language string
 	Parent   string
 	TopLevel string
+
+	DownloadPOM  string // new column for direct .pom or fallback
+	RepoInfoURL  string // new column for repo browsing link (mvnrepository, google maven, or fallback)
 }
 
 // skip test/provided/system scopes
@@ -256,6 +249,15 @@ func concurrentFetchPOM(g, a, v string) (*MavenPOM, error) {
 		pomCache.Store(key, res.POM)
 	}
 	return res.POM, res.Err
+}
+
+// BFS worker
+func pomFetchWorker() {
+	defer wgWorkers.Done()
+	for req := range pomRequests {
+		pom, err := retrieveOrLoadPOM(req.GroupID, req.ArtifactID, req.Version)
+		req.ResultChan <- fetchResult{pom, err}
+	}
 }
 
 // retrieveOrLoadPOM => from cache or remote => merges parents
@@ -440,16 +442,38 @@ func splitGA(ga string) (string, string) {
 	return p[0], p[1]
 }
 
-// buildPOMLink => actual .pom file link for BFS
+// buildPOMLink => central
 func buildPOMLink(g, a, v string) string {
 	groupPath := strings.ReplaceAll(g, ".", "/")
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
 }
 
-// buildGoogleLink => fallback if central 404
+// buildGoogleLink => google mirror
 func buildGoogleLink(g, a, v string) string {
 	groupPath := strings.ReplaceAll(g, ".", "/")
 	return fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
+}
+
+// fallback to a google search if we truly have no direct link
+func googleSearchLink(g, a, v string) string {
+	q := g + " " + a + " " + v + " pom"
+	q = strings.ReplaceAll(q, " ", "+")
+	return "https://www.google.com/search?q=" + q
+}
+
+// buildRepoInfoLink => pick google maven or mvnrepository
+func buildRepoInfoLink(g, a, v string) string {
+	if g == "" || a == "" {
+		// fallback
+		q := g + " " + a + " " + v
+		return "https://www.google.com/search?q=" + strings.ReplaceAll(q, " ", "+")
+	}
+	if strings.HasPrefix(g, "com.android") {
+		// google maven web
+		return fmt.Sprintf("https://maven.google.com/web/index.html?q=%s#%s:%s:%s", a, g, a, v)
+	}
+	// else
+	return fmt.Sprintf("https://mvnrepository.com/artifact/%s/%s", g, a)
 }
 
 // -----------------------------------------------------------------------------
@@ -511,14 +535,13 @@ func buildTransitiveClosureForPOM(secs []PomReportSection) {
 		var queue []struct {
 			ga    string
 			ov    string
-			depth int
 			node  *DependencyNode
 		}
 		for ga, ver := range sec.DirectDeps {
 			n := &DependencyNode{
 				Name:            ga,
 				OriginalVersion: ver,
-				EffectiveVer:    ver, // might be replaced
+				EffectiveVer:    ver,
 				Parent:          "direct",
 				TopLevel:        ga,
 			}
@@ -528,9 +551,8 @@ func buildTransitiveClosureForPOM(secs []PomReportSection) {
 			queue = append(queue, struct {
 				ga    string
 				ov    string
-				depth int
 				node  *DependencyNode
-			}{ga, ver, 1, n})
+			}{ga, ver, n})
 		}
 
 		for len(queue) > 0 {
@@ -552,30 +574,30 @@ func buildTransitiveClosureForPOM(secs []PomReportSection) {
 			if err != nil || pom == nil {
 				continue
 			}
-			// set license
 			lic := detectLicense(pom)
 			it.node.License = lic
 			it.node.Copyleft = isCopyleft(lic)
-			it.node.SourceLink = buildPOMLink(g, a, eff) // actual .pom URL
+			it.node.SourceLink = buildPOMLink(g, a, eff)
 
+			// BFS children
 			for _, d := range pom.Dependencies {
 				if skipScope(d.Scope, d.Optional) {
 					continue
 				}
 				cga := d.GroupID + "/" + d.ArtifactID
-				ov := d.Version
-				if ov == "" {
-					ov = "unknown"
+				cv := d.Version
+				if cv == "" {
+					cv = "unknown"
 				}
-				ck := cga + "@" + ov
+				ck := cga + "@" + cv
 				if visited[ck] {
 					continue
 				}
 				visited[ck] = true
 				child := &DependencyNode{
 					Name:            cga,
-					OriginalVersion: ov,
-					EffectiveVer:    ov,
+					OriginalVersion: cv,
+					EffectiveVer:    cv,
 					Parent:          fmt.Sprintf("%s:%s", it.ga, eff),
 					TopLevel:        it.node.TopLevel,
 				}
@@ -583,9 +605,8 @@ func buildTransitiveClosureForPOM(secs []PomReportSection) {
 				queue = append(queue, struct {
 					ga    string
 					ov    string
-					depth int
 					node  *DependencyNode
-				}{cga, ov, it.depth + 1, child})
+				}{cga, cv, child})
 			}
 		}
 
@@ -605,19 +626,37 @@ func buildTransitiveClosureForPOM(secs []PomReportSection) {
 }
 
 func flattenPOMNode(n *DependencyNode, out *[]FlatDep) {
-	details := buildPOMLinkFromNode(n)
+	g, a := splitGA(n.Name)
 	ver := n.OriginalVersion
 	if strings.ToLower(ver) == "unknown" && n.EffectiveVer != "unknown" {
-		ver = fmt.Sprintf("missing in source => %s", n.EffectiveVer)
+		ver = "missing in source => " + n.EffectiveVer
 	}
+	// Build the "existing" .Details link (like old code)
+	details := buildPOMLink(g, a, n.EffectiveVer)
+
+	// For the new columns:
+	downloadPOM := ""
+	// if BFS found a SourceLink, we trust that, else do fallback
+	if n.SourceLink != "" {
+		downloadPOM = n.SourceLink
+	} else {
+		// fallback to google search
+		downloadPOM = googleSearchLink(g, a, n.EffectiveVer)
+	}
+
+	repoInfo := buildRepoInfoLink(g, a, n.EffectiveVer)
+
 	fd := FlatDep{
-		Name:     n.Name,
-		Version:  ver,
-		License:  n.License,
-		Details:  details,
-		Language: "maven",
-		Parent:   n.Parent,
-		TopLevel: n.TopLevel,
+		Name:       n.Name,
+		Version:    ver,
+		License:    n.License,
+		Details:    details,
+		Language:   "maven",
+		Parent:     n.Parent,
+		TopLevel:   n.TopLevel,
+
+		DownloadPOM: downloadPOM,
+		RepoInfoURL: repoInfo,
 	}
 	*out = append(*out, fd)
 	for _, c := range n.Transitive {
@@ -625,16 +664,44 @@ func flattenPOMNode(n *DependencyNode, out *[]FlatDep) {
 	}
 }
 
-// buildPOMLinkFromNode => if BFS ended up using google mirror, we might do that. For simplicity, we always do central
-func buildPOMLinkFromNode(n *DependencyNode) string {
-	g, a := splitGA(n.Name)
-	if n.EffectiveVer == "" || strings.ToLower(n.EffectiveVer) == "unknown" {
-		// fallback
-		return fmt.Sprintf("https://repo1.maven.org/maven2/%s", n.Name)
+// BFS expansions
+func buildPOMTreeHTML(n *DependencyNode) string {
+	sum := fmt.Sprintf("%s@%s (License: %s)", n.Name, n.EffectiveVer, n.License)
+	if n.OriginalVersion != n.EffectiveVer && strings.ToLower(n.OriginalVersion) == "unknown" {
+		sum += " [source missing => used " + n.EffectiveVer + "]"
 	}
-	groupPath := strings.ReplaceAll(g, ".", "/")
-	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom",
-		groupPath, a, n.EffectiveVer, a, n.EffectiveVer)
+	cls := "non-copyleft"
+	if n.License == "Unknown" {
+		cls = "unknown"
+	} else if isCopyleft(n.License) {
+		cls = "copyleft"
+	}
+	var sb strings.Builder
+	sb.WriteString("<details><summary class=\"" + cls + "\">")
+	sb.WriteString(template.HTMLEscapeString(sum))
+	sb.WriteString("</summary>\n")
+	if len(n.Transitive) > 0 {
+		sb.WriteString("<ul>\n")
+		for _, c := range n.Transitive {
+			sb.WriteString("<li>")
+			sb.WriteString(buildPOMTreeHTML(c))
+			sb.WriteString("</li>\n")
+		}
+		sb.WriteString("</ul>\n")
+	}
+	sb.WriteString("</details>\n")
+	return sb.String()
+}
+
+func buildPOMTreesHTML(nodes []*DependencyNode) string {
+	if len(nodes) == 0 {
+		return "<p>No BFS expansions found.</p>"
+	}
+	var sb strings.Builder
+	for _, n := range nodes {
+		sb.WriteString(buildPOMTreeHTML(n))
+	}
+	return sb.String()
 }
 
 // -----------------------------------------------------------------------------
@@ -736,10 +803,9 @@ func buildTransitiveClosureForToml(secs []TomlReportSection) {
 		visited := make(map[string]bool)
 		var roots []*DependencyNode
 		var queue []struct {
-			ga    string
-			ov    string
-			depth int
-			node  *DependencyNode
+			ga   string
+			ov   string
+			node *DependencyNode
 		}
 		for ga, ver := range sec.DirectDeps {
 			n := &DependencyNode{
@@ -753,11 +819,10 @@ func buildTransitiveClosureForToml(secs []TomlReportSection) {
 			key := ga + "@" + ver
 			visited[key] = true
 			queue = append(queue, struct {
-				ga    string
-				ov    string
-				depth int
-				node  *DependencyNode
-			}{ga, ver, 1, n})
+				ga   string
+				ov   string
+				node *DependencyNode
+			}{ga, ver, n})
 		}
 		for len(queue) > 0 {
 			it := queue[0]
@@ -806,11 +871,10 @@ func buildTransitiveClosureForToml(secs []TomlReportSection) {
 				}
 				it.node.Transitive = append(it.node.Transitive, child)
 				queue = append(queue, struct {
-					ga    string
-					ov    string
-					depth int
-					node  *DependencyNode
-				}{cga, cv, it.depth + 1, child})
+					ga   string
+					ov   string
+					node *DependencyNode
+				}{cga, cv, child})
 			}
 		}
 		var flat []FlatDep
@@ -827,9 +891,9 @@ func buildTransitiveClosureForToml(secs []TomlReportSection) {
 	}
 }
 
-// ------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // 5) GRADLE BFS
-// ------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 type GradleReportSection struct {
 	FilePath       string
@@ -858,7 +922,6 @@ func findBuildGradleFiles(root string) ([]string, error) {
 	return out, err
 }
 
-// parse def var= "1.2.3" and lines like compile "group:artifact:version"
 func parseBuildGradleFile(filePath string) (map[string]ExtendedDepInfo, error) {
 	dat, err := os.ReadFile(filePath)
 	if err != nil {
@@ -915,14 +978,13 @@ func buildTransitiveClosureForGradle(gsec []GradleReportSection) {
 	for i := range gsec {
 		sec := &gsec[i]
 		visited := make(map[string]bool)
-		nodeMap := make(map[string]*GradleDependencyNode)
 		var roots []*GradleDependencyNode
 		var queue []struct {
 			ga  string
 			ov  string
 			dep *GradleDependencyNode
 		}
-		// BFS init from direct
+		// BFS init
 		for depKey, info := range sec.Dependencies {
 			gaVer := strings.SplitN(depKey, "@", 2)
 			ga := gaVer[0]
@@ -936,7 +998,6 @@ func buildTransitiveClosureForGradle(gsec []GradleReportSection) {
 				TopLevel:        ga,
 			}
 			roots = append(roots, n)
-			nodeMap[depKey] = n
 			queue = append(queue, struct {
 				ga  string
 				ov  string
@@ -968,7 +1029,6 @@ func buildTransitiveClosureForGradle(gsec []GradleReportSection) {
 			it.dep.Copyleft = isCopyleft(lic)
 			it.dep.SourceLink = buildPOMLink(g, a, eff)
 
-			// parse sub-deps
 			managed := parseManagedVersions(pom)
 			for _, d := range pom.Dependencies {
 				if skipScope(d.Scope, d.Optional) {
@@ -980,7 +1040,6 @@ func buildTransitiveClosureForGradle(gsec []GradleReportSection) {
 					cv = "unknown"
 				}
 				if cv == "unknown" {
-					// see if managed has it
 					if mv, ok := managed[cga]; ok && mv != "" {
 						cv = mv
 					}
@@ -1022,19 +1081,32 @@ func buildTransitiveClosureForGradle(gsec []GradleReportSection) {
 }
 
 func flattenGradleNode(n *GradleDependencyNode, out *[]FlatDep) {
-	details := buildGradleLinkFromNode(n)
+	g, a := splitGA(n.Name)
 	ver := n.OriginalVersion
 	if strings.ToLower(ver) == "unknown" && n.EffectiveVer != "unknown" {
-		ver = fmt.Sprintf("missing in source => %s", n.EffectiveVer)
+		ver = "missing in source => " + n.EffectiveVer
 	}
+	details := buildPOMLink(g, a, n.EffectiveVer)
+
+	downloadPOM := ""
+	if n.SourceLink != "" {
+		downloadPOM = n.SourceLink
+	} else {
+		downloadPOM = googleSearchLink(g, a, n.EffectiveVer)
+	}
+	repoInfo := buildRepoInfoLink(g, a, n.EffectiveVer)
+
 	fd := FlatDep{
-		Name:     n.Name,
-		Version:  ver,
-		License:  n.License,
-		Details:  details,
-		Language: "gradle",
-		Parent:   n.Parent,
-		TopLevel: n.TopLevel,
+		Name:       n.Name,
+		Version:    ver,
+		License:    n.License,
+		Details:    details,
+		Language:   "gradle",
+		Parent:     n.Parent,
+		TopLevel:   n.TopLevel,
+
+		DownloadPOM: downloadPOM,
+		RepoInfoURL: repoInfo,
 	}
 	*out = append(*out, fd)
 	for _, c := range n.Transitive {
@@ -1042,17 +1114,6 @@ func flattenGradleNode(n *GradleDependencyNode, out *[]FlatDep) {
 	}
 }
 
-func buildGradleLinkFromNode(n *GradleDependencyNode) string {
-	g, a := splitGA(n.Name)
-	if n.EffectiveVer == "" || strings.ToLower(n.EffectiveVer) == "unknown" {
-		return fmt.Sprintf("https://repo1.maven.org/maven2/%s", n.Name)
-	}
-	groupPath := strings.ReplaceAll(g, ".", "/")
-	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom",
-		groupPath, a, n.EffectiveVer, a, n.EffectiveVer)
-}
-
-// parseManagedVersions => merges from pom.DependencyMgmt
 func parseManagedVersions(pom *MavenPOM) map[string]string {
 	out := make(map[string]string)
 	for _, d := range pom.DependencyMgmt.Dependencies {
@@ -1067,9 +1128,12 @@ func parseManagedVersions(pom *MavenPOM) map[string]string {
 	return out
 }
 
-// ------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // 6) FINAL REPORT
-// ------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+
+// We add 2 new columns in each table: DownloadPOM and Maven/Repo Info
+// Also add a top-level "Summary" with total top-level POM, TOML, Gradle, and Copyleft count.
 
 var finalReportTemplate = `
 <!DOCTYPE html>
@@ -1093,6 +1157,9 @@ summary{cursor:pointer;font-weight:bold}
 <body>
 <h1>Maven Multi-File Dependency License Report</h1>
 
+<h2>Summary</h2>
+<p>{{.Summary}}</p>
+
 {{range .PomSections}}
 <h2>POM Dependencies (from: {{.FilePath}})</h2>
 {{if eq (len .Flattened) 0}}
@@ -1107,6 +1174,8 @@ summary{cursor:pointer;font-weight:bold}
   <th>Top-Level</th>
   <th>Language</th>
   <th>Details (.pom)</th>
+  <th>Download POM</th>
+  <th>Maven/Repo Info</th>
 </tr>
 {{range .Flattened}}
 <tr>
@@ -1118,7 +1187,9 @@ summary{cursor:pointer;font-weight:bold}
   <td>{{.Parent}}</td>
   <td>{{.TopLevel}}</td>
   <td>{{.Language}}</td>
-  <td><a href="{{.Details}}" target="_blank">{{.Details}}</a></td>
+  <td><a href="{{.Details}}" target="_blank">Link</a></td>
+  <td><a href="{{.DownloadPOM}}" target="_blank">Link</a></td>
+  <td><a href="{{.RepoInfoURL}}" target="_blank">Link</a></td>
 </tr>
 {{end}}
 </table>
@@ -1144,6 +1215,8 @@ summary{cursor:pointer;font-weight:bold}
   <th>Top-Level</th>
   <th>Language</th>
   <th>Details (.pom)</th>
+  <th>Download POM</th>
+  <th>Maven/Repo Info</th>
 </tr>
 {{range .Flattened}}
 <tr>
@@ -1155,7 +1228,9 @@ summary{cursor:pointer;font-weight:bold}
   <td>{{.Parent}}</td>
   <td>{{.TopLevel}}</td>
   <td>{{.Language}}</td>
-  <td><a href="{{.Details}}" target="_blank">{{.Details}}</a></td>
+  <td><a href="{{.Details}}" target="_blank">Link</a></td>
+  <td><a href="{{.DownloadPOM}}" target="_blank">Link</a></td>
+  <td><a href="{{.RepoInfoURL}}" target="_blank">Link</a></td>
 </tr>
 {{end}}
 </table>
@@ -1181,6 +1256,8 @@ summary{cursor:pointer;font-weight:bold}
   <th>Top-Level</th>
   <th>Language</th>
   <th>Details (.pom)</th>
+  <th>Download POM</th>
+  <th>Maven/Repo Info</th>
 </tr>
 {{range .Flattened}}
 <tr>
@@ -1192,7 +1269,9 @@ summary{cursor:pointer;font-weight:bold}
   <td>{{.Parent}}</td>
   <td>{{.TopLevel}}</td>
   <td>{{.Language}}</td>
-  <td><a href="{{.Details}}" target="_blank">{{.Details}}</a></td>
+  <td><a href="{{.Details}}" target="_blank">Link</a></td>
+  <td><a href="{{.DownloadPOM}}" target="_blank">Link</a></td>
+  <td><a href="{{.RepoInfoURL}}" target="_blank">Link</a></td>
 </tr>
 {{end}}
 </table>
@@ -1208,89 +1287,6 @@ summary{cursor:pointer;font-weight:bold}
 </html>
 `
 
-// BFS expansions
-func buildPOMTreeHTML(n *DependencyNode) string {
-	sum := fmt.Sprintf("%s@%s (License: %s)", n.Name, n.EffectiveVer, n.License)
-	if n.OriginalVersion != n.EffectiveVer && strings.ToLower(n.OriginalVersion) == "unknown" {
-		sum += " [source missing => used " + n.EffectiveVer + "]"
-	}
-	cls := "non-copyleft"
-	if n.License == "Unknown" {
-		cls = "unknown"
-	} else if isCopyleft(n.License) {
-		cls = "copyleft"
-	}
-	var sb strings.Builder
-	sb.WriteString("<details><summary class=\"" + cls + "\">")
-	sb.WriteString(template.HTMLEscapeString(sum))
-	sb.WriteString("</summary>\n")
-	if len(n.Transitive) > 0 {
-		sb.WriteString("<ul>\n")
-		for _, c := range n.Transitive {
-			sb.WriteString("<li>")
-			sb.WriteString(buildPOMTreeHTML(c))
-			sb.WriteString("</li>\n")
-		}
-		sb.WriteString("</ul>\n")
-	}
-	sb.WriteString("</details>\n")
-	return sb.String()
-}
-
-func buildPOMTreesHTML(nodes []*DependencyNode) string {
-	if len(nodes) == 0 {
-		return "<p>No BFS expansions found.</p>"
-	}
-	var sb strings.Builder
-	for _, n := range nodes {
-		sb.WriteString(buildPOMTreeHTML(n))
-	}
-	return sb.String()
-}
-
-func buildGradleTreeHTML(n *GradleDependencyNode) string {
-	sum := fmt.Sprintf("%s@%s (License: %s)", n.Name, n.EffectiveVer, n.License)
-	if n.OriginalVersion != n.EffectiveVer && strings.ToLower(n.OriginalVersion) == "unknown" {
-		sum += " [source missing => used " + n.EffectiveVer + "]"
-	}
-	cls := "non-copyleft"
-	if n.License == "Unknown" {
-		cls = "unknown"
-	} else if isCopyleft(n.License) {
-		cls = "copyleft"
-	}
-	var sb strings.Builder
-	sb.WriteString("<details><summary class=\"" + cls + "\">")
-	sb.WriteString(template.HTMLEscapeString(sum))
-	sb.WriteString("</summary>\n")
-	if len(n.Transitive) > 0 {
-		sb.WriteString("<ul>\n")
-		for _, c := range n.Transitive {
-			sb.WriteString("<li>")
-			sb.WriteString(buildGradleTreeHTML(c))
-			sb.WriteString("</li>\n")
-		}
-		sb.WriteString("</ul>\n")
-	}
-	sb.WriteString("</details>\n")
-	return sb.String()
-}
-
-func buildGradleTreesHTML(nodes []*GradleDependencyNode) string {
-	if len(nodes) == 0 {
-		return "<p>No BFS expansions found.</p>"
-	}
-	var sb strings.Builder
-	for _, n := range nodes {
-		sb.WriteString(buildGradleTreeHTML(n))
-	}
-	return sb.String()
-}
-
-// ------------------------------------------------------------------------------------
-// MAIN
-// ------------------------------------------------------------------------------------
-
 func main() {
 	// Worker pool
 	for i := 0; i < pomWorkerCount; i++ {
@@ -1301,12 +1297,14 @@ func main() {
 	// 1) POM
 	pomFiles, _ := findAllPOMFiles(".")
 	var pomSections []PomReportSection
+	var totalPomTopLevel int
 	for _, pf := range pomFiles {
 		depMap, err := parseOneLocalPOMFile(pf)
 		if err != nil {
 			fmt.Printf("Error parse POM %s => %v\n", pf, err)
 			continue
 		}
+		totalPomTopLevel += len(depMap)
 		pomSections = append(pomSections, PomReportSection{pf, depMap, nil, nil})
 	}
 	buildTransitiveClosureForPOM(pomSections)
@@ -1314,12 +1312,14 @@ func main() {
 	// 2) TOML
 	tomlFiles, _ := findTOMLFile(".")
 	var tomlSections []TomlReportSection
+	var totalTomlTopLevel int
 	for _, tf := range tomlFiles {
 		depMap, err := parseTOMLFile(tf)
 		if err != nil {
 			fmt.Printf("Error parse TOML %s => %v\n", tf, err)
 			continue
 		}
+		totalTomlTopLevel += len(depMap)
 		tomlSections = append(tomlSections, TomlReportSection{tf, depMap, nil, nil})
 	}
 	buildTransitiveClosureForToml(tomlSections)
@@ -1327,12 +1327,15 @@ func main() {
 	// 3) Gradle
 	gradleFiles, _ := findBuildGradleFiles(".")
 	var gradleSections []GradleReportSection
+	var totalGradleTopLevel int
 	for _, gf := range gradleFiles {
 		dmap, err := parseBuildGradleFile(gf)
 		if err != nil {
 			fmt.Printf("Error parse Gradle %s => %v\n", gf, err)
 			continue
 		}
+		// each key is group/artifact@version => 1 direct dep
+		totalGradleTopLevel += len(dmap)
 		gradleSections = append(gradleSections, GradleReportSection{gf, dmap, nil, nil})
 	}
 	buildTransitiveClosureForGradle(gradleSections)
@@ -1393,15 +1396,47 @@ func main() {
 		})
 	}
 
+	// Build summary
+	// Count total copyleft across all BFS
+	copyleftCount := 0
+	for _, psec := range pomSections {
+		for _, f := range psec.Flattened {
+			if isCopyleft(f.License) {
+				copyleftCount++
+			}
+		}
+	}
+	for _, tsec := range tomlSections {
+		for _, f := range tsec.Flattened {
+			if isCopyleft(f.License) {
+				copyleftCount++
+			}
+		}
+	}
+	for _, gsec := range gradleSections {
+		for _, f := range gsec.Flattened {
+			if isCopyleft(f.License) {
+				copyleftCount++
+			}
+		}
+	}
+
+	summaryLine := fmt.Sprintf(
+		"Maven top-level: %d, TOML top-level: %d, Gradle top-level: %d, Copyleft: %d",
+		totalPomTopLevel, totalTomlTopLevel, totalGradleTopLevel, copyleftCount,
+	)
+
 	// Data for template
 	data := struct {
+		Summary       string
 		PomSections    []pomHTMLSection
 		TomlSections   []tomlHTMLSection
 		GradleSections []gradleHTMLSection
 	}{
-		finalPom,
-		finalToml,
-		finalGradle,
+		Summary:       summaryLine,
+		PomSections:   finalPom,
+		TomlSections:  finalToml,
+		GradleSections: finalGradle,
 	}
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
