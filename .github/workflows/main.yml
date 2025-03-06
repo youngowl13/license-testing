@@ -29,6 +29,8 @@ jobs:
           go mod init license-checker || true
           go mod tidy
           go run license.go
+          ls -la
+          pwd
 
       # Step 4: Verify the generated report
       - name: Verify Report
