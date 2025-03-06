@@ -57,6 +57,18 @@ var spdxLicenseMap = map[string]struct {
 	"AGPL-3.0":     {Name: "GNU Affero GPL v3.0", Copyleft: true},
 }
 
+// ------------------------------------------------------------------------
+// HERE is the missing helper
+// ------------------------------------------------------------------------
+func getLicenseGroup(license string) int {
+	if isCopyleft(license) {
+		return 1
+	} else if license == "Unknown" {
+		return 2
+	}
+	return 3
+}
+
 // ------------------------------------------------------------------------------------
 // 2) DATA STRUCTURES
 // ------------------------------------------------------------------------------------
@@ -498,7 +510,7 @@ func buildTransitiveClosureForPOM(secs []PomReportSection) {
 		var roots []*DependencyNode
 		var queue []struct {
 			ga    string
-			ov    string // original version
+			ov    string
 			depth int
 			node  *DependencyNode
 		}
@@ -613,7 +625,7 @@ func flattenPOMNode(n *DependencyNode, out *[]FlatDep) {
 	}
 }
 
-// buildPOMLinkFromNode => if BFS ended up using google mirror, we might do that. For simplicity, we always do maven central?
+// buildPOMLinkFromNode => if BFS ended up using google mirror, we might do that. For simplicity, we always do central
 func buildPOMLinkFromNode(n *DependencyNode) string {
 	g, a := splitGA(n.Name)
 	if n.EffectiveVer == "" || strings.ToLower(n.EffectiveVer) == "unknown" {
