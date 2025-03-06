@@ -858,7 +858,7 @@ func main() {
 		fmt.Println("Template parse error:", err)
 		return
 	}
-	out, err := os.Create("license-full-bfs-report.html")
+	out, err := os.Create("maven-multi-file-report.html")
 	if err != nil {
 		fmt.Println("Error creating output file =>", err)
 		return
@@ -870,5 +870,5 @@ func main() {
 		return
 	}
 
-	fmt.Println("license-full-bfs-report.html generated successfully!")
+	fmt.Println("maven-multi-file-report.html generated successfully!")
 }
