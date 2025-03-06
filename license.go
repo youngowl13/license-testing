@@ -30,14 +30,15 @@ const (
 var (
 	pomRequests  = make(chan fetchRequest, 50)
 	wgWorkers    sync.WaitGroup
-	pomCache     sync.Map // key="group:artifact:version" => *MavenPOM
+
+	pomCache sync.Map // key: "group:artifact:version" => *MavenPOM
 
 	channelOpen  = true
 	channelMutex sync.Mutex
 )
 
 // ----------------------------------------------------------------------
-// 2) LICENSE DETECTION (Comprehensive copyleft)
+// 2) LICENSE DETECTION (Comprehensive Copyleft)
 // ----------------------------------------------------------------------
 
 var spdxLicenseMap = map[string]struct {
@@ -65,16 +66,15 @@ var spdxLicenseMap = map[string]struct {
 	"EUPL":                             {Name: "European Union Public License", Copyleft: true},
 }
 
+// fallback keywords
 func isCopyleft(license string) bool {
-	// 1) SPDx direct
 	for spdxID, data := range spdxLicenseMap {
 		if data.Copyleft && (strings.EqualFold(license, data.Name) ||
 			strings.EqualFold(license, spdxID)) {
 			return true
 		}
 	}
-	// 2) fallback keywords
-	fallbackKeywords := []string{
+	kw := []string{
 		"GPL", "GNU GENERAL PUBLIC LICENSE",
 		"LGPL", "GNU LESSER GENERAL PUBLIC LICENSE",
 		"AGPL", "GNU AFFERO GENERAL PUBLIC LICENSE",
@@ -88,8 +88,8 @@ func isCopyleft(license string) bool {
 		"EUPL", "EUROPEAN UNION PUBLIC LICENSE",
 	}
 	up := strings.ToUpper(license)
-	for _, kw := range fallbackKeywords {
-		if strings.Contains(up, strings.ToUpper(kw)) {
+	for _, k := range kw {
+		if strings.Contains(up, strings.ToUpper(k)) {
 			return true
 		}
 	}
@@ -106,7 +106,7 @@ func getLicenseGroup(lic string) int {
 }
 
 // ----------------------------------------------------------------------
-// 3) skipScope => skip test/provided/system & optional="true"
+// 3) skipScope => skip test/provided/system/optional
 // ----------------------------------------------------------------------
 
 func skipScope(scope, optional string) bool {
@@ -121,7 +121,7 @@ func skipScope(scope, optional string) bool {
 }
 
 // ----------------------------------------------------------------------
-// 4) BFS WORKER
+// 4) BFS Worker for concurrency
 // ----------------------------------------------------------------------
 
 type fetchRequest struct {
@@ -145,7 +145,7 @@ func pomWorker() {
 }
 
 // ----------------------------------------------------------------------
-// 5) MAVEN POM + detectLicense
+// 5) MAVEN POM struct + detectLicense
 // ----------------------------------------------------------------------
 
 type POMDep struct {
@@ -160,7 +160,6 @@ type MavenPOM struct {
 	GroupID    string
 	ArtifactID string
 	Version    string
-
 	Licenses []struct {
 		Name string `xml:"name"`
 	} `xml:"licenses>license"`
@@ -168,11 +167,11 @@ type MavenPOM struct {
 	Dependencies []POMDep `xml:"dependencies>dependency"`
 }
 
-func detectLicense(p *MavenPOM) string {
-	if len(p.Licenses) == 0 {
+func detectLicense(m *MavenPOM) string {
+	if len(m.Licenses) == 0 {
 		return "Unknown"
 	}
-	lic := strings.TrimSpace(p.Licenses[0].Name)
+	lic := strings.TrimSpace(m.Licenses[0].Name)
 	if lic == "" {
 		return "Unknown"
 	}
@@ -215,11 +214,12 @@ func concurrentFetchPOM(g, a, v string) (*MavenPOM, error) {
 	return res.POM, res.Err
 }
 
-// fetchRemotePOM => tries central + google
+// fetchRemotePOM => tries central, google
 func fetchRemotePOM(g, a, v string) (*MavenPOM, error) {
-	gpath := strings.ReplaceAll(g, ".", "/")
-	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", gpath, a, v, a, v)
-	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", gpath, a, v, a, v)
+	groupPath := strings.ReplaceAll(g, ".", "/")
+	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
+	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, a, v, a, v)
+
 	if pm, e := fetchPOMFromURL(urlC); e == nil && pm != nil {
 		return pm, nil
 	}
@@ -239,12 +239,12 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("HTTP %d => %s", resp.StatusCode, url)
 	}
-	dat, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	var pom MavenPOM
-	dec := xml.NewDecoder(bytes.NewReader(dat))
+	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = false
 	if e2 := dec.Decode(&pom); e2 != nil {
 		return nil, e2
@@ -253,7 +253,7 @@ func fetchPOMFromURL(url string) (*MavenPOM, error) {
 }
 
 // ----------------------------------------------------------------------
-// 7) FallbackVersionIfUnknown => getLatestVersion
+// 7) fallbackVersionIfUnknown => getLatestVersion
 // ----------------------------------------------------------------------
 
 func fallbackVersionIfUnknown(g, a, ver string) (string, error) {
@@ -281,8 +281,8 @@ func getLatestVersion(g, a string) (string, error) {
 }
 
 func fetchLatestVersionFromURL(url string) (string, error) {
-	client := http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(url)
+	cl := http.Client{Timeout: 15 * time.Second}
+	resp, err := cl.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -319,9 +319,14 @@ func fetchLatestVersionFromURL(url string) (string, error) {
 }
 
 // ----------------------------------------------------------------------
-// 8) splitGA, buildRepoLink
+// 8) splitGA, buildRepoLink => improved link logic
 // ----------------------------------------------------------------------
 
+// We'll do a custom approach:
+//  - If g starts with "com.android" or "androidx", link Google Maven
+//  - else if it has "jetbrains", "kotlin", we link to search.maven.org
+//  - else fallback to search.maven.org
+//  - if artifact is empty => google search
 func splitGA(ga string) (string, string) {
 	parts := strings.SplitN(ga, "/", 2)
 	if len(parts) != 2 {
@@ -332,11 +337,21 @@ func splitGA(ga string) (string, string) {
 
 func buildRepoLink(g, a, v string) string {
 	if g == "" || a == "" {
-		// fallback
+		// fallback => google search
 		q := g + " " + a + " " + v
 		return "https://www.google.com/search?q=" + strings.ReplaceAll(q, " ", "+")
 	}
-	return fmt.Sprintf("https://maven.google.com/web/index.html?q=%s#%s:%s:%s", a, g, a, v)
+	// If it starts with "com.android", "androidx."
+	if strings.HasPrefix(g, "com.android") || strings.HasPrefix(g, "androidx") {
+		return fmt.Sprintf("https://maven.google.com/web/index.html?q=%s#%s:%s:%s", a, g, a, v)
+	}
+	// If group suggests "jetbrains" or "kotlin"
+	if strings.Contains(g, "jetbrains") || strings.Contains(g, "kotlin") {
+		// Link to search.maven.org for that coordinate
+		return fmt.Sprintf("https://search.maven.org/artifact/%s/%s/%s/pom", g, a, v)
+	}
+	// default => search.maven.org
+	return fmt.Sprintf("https://search.maven.org/artifact/%s/%s/%s/pom", g, a, v)
 }
 
 // ----------------------------------------------------------------------
@@ -344,7 +359,7 @@ func buildRepoLink(g, a, v string) string {
 // ----------------------------------------------------------------------
 
 type BFSNode struct {
-	Name     string
+	Name     string // "group/artifact"
 	Version  string
 	License  string
 	Copyleft bool
@@ -364,9 +379,9 @@ func buildFullBFS(g, a, ver, parent string, visited map[string]bool) *BFSNode {
 		eff = ver
 	}
 	n := &BFSNode{
-		Name:   g + "/" + a,
+		Name:    g + "/" + a,
 		Version: eff,
-		Parent: parent,
+		Parent:  parent,
 		License: "Unknown",
 	}
 	pom, errF := concurrentFetchPOM(g, a, eff)
@@ -414,7 +429,6 @@ func flattenBFSNode(n *BFSNode, lang string, out *[]FlatDep) {
 	}
 }
 
-// Flatten data
 type FlatDep struct {
 	Name     string
 	Version  string
@@ -431,6 +445,7 @@ type BFSSection struct {
 	Flattened []FlatDep
 }
 
+// BFS from direct
 func doBFSForDirect(depMap map[string]string, filePath, lang string) BFSSection {
 	visited := make(map[string]bool)
 	var roots []*BFSNode
@@ -456,7 +471,7 @@ func doBFSForDirect(depMap map[string]string, filePath, lang string) BFSSection 
 }
 
 // ----------------------------------------------------------------------
-// 10) PARSE: pom.xml, .toml, build.gradle
+// 10) parse each type: pom.xml, .toml, build.gradle
 // ----------------------------------------------------------------------
 
 // parse pom.xml
@@ -510,16 +525,16 @@ func findTOMLFiles(root string) ([]string, error) {
 }
 
 func parseTomlFile(filePath string) (map[string]string, error) {
-	tree, err := toml.LoadFile(filePath)
+	imports := make(map[string]string)
+	dat, err := toml.LoadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
-	res := make(map[string]string)
-	libsObj := tree.Get("libraries")
-	if libsObj == nil {
-		return res, nil
+	libObj := dat.Get("libraries")
+	if libObj == nil {
+		return imports, nil
 	}
-	libTree, ok := libsObj.(*toml.Tree)
+	libTree, ok := libObj.(*toml.Tree)
 	if !ok {
 		return nil, fmt.Errorf("'libraries' not valid in %s", filePath)
 	}
@@ -538,12 +553,11 @@ func parseTomlFile(filePath string) (map[string]string, error) {
 		if len(parts) < 2 {
 			continue
 		}
-		g := parts[0]
-		a := parts[1]
+		g, a := parts[0], parts[1]
 		key := g + "/" + a
-		res[key] = verRef
+		imports[key] = verRef
 	}
-	return res, nil
+	return imports, nil
 }
 
 // parse build.gradle
@@ -565,12 +579,12 @@ func parseBuildGradleFile(filePath string) (map[string]string, error) {
 	}
 	content := string(dat)
 	res := make(map[string]string)
-	varMap := parseGradleVariables(content)
+	vars := parseGradleVariables(content)
 
-	reDeps := regexp.MustCompile(`(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|androidTestImplementation|classpath)\s+['"]([^'"]+)['"]`)
-	matches := reDeps.FindAllStringSubmatch(content, -1)
-	for _, m := range matches {
-		coord := m[2]
+	rx := regexp.MustCompile(`(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|androidTestImplementation|classpath)\s+['"]([^'"]+)['"]`)
+	matches := rx.FindAllStringSubmatch(content, -1)
+	for _, mm := range matches {
+		coord := mm[2]
 		parts := strings.Split(coord, ":")
 		if len(parts) < 2 {
 			continue
@@ -581,10 +595,10 @@ func parseBuildGradleFile(filePath string) (map[string]string, error) {
 		if len(parts) >= 3 {
 			v = parts[2]
 			if strings.Contains(v, "${") {
-				reVar := regexp.MustCompile(`\$\{([^}]+)\}`)
-				v = reVar.ReplaceAllStringFunc(v, func(s string) string {
+				rv := regexp.MustCompile(`\$\{([^}]+)\}`)
+				v = rv.ReplaceAllStringFunc(v, func(s string) string {
 					inner := s[2 : len(s)-1]
-					if val, ok := varMap[inner]; ok {
+					if val, ok := vars[inner]; ok {
 						return val
 					}
 					return ""
@@ -600,15 +614,14 @@ func parseBuildGradleFile(filePath string) (map[string]string, error) {
 	return res, nil
 }
 
-// parseGradleVariables => parse def var=...
 func parseGradleVariables(content string) map[string]string {
-	vars := make(map[string]string)
+	out := make(map[string]string)
 	rx := regexp.MustCompile(`(?m)^\s*def\s+(\w+)\s*=\s*["']([^"']+)["']`)
 	matches := rx.FindAllStringSubmatch(content, -1)
 	for _, mm := range matches {
-		vars[mm[1]] = mm[2]
+		out[mm[1]] = mm[2]
 	}
-	return vars
+	return out
 }
 
 // ----------------------------------------------------------------------
@@ -758,10 +771,7 @@ summary{cursor:pointer;font-weight:bold}
 </html>
 `
 
-// ----------------------------------------------------------------------
-// BFS expansions => <details> block
-// ----------------------------------------------------------------------
-
+// BFS expansions => <details>
 func buildBFSHTML(n *BFSNode) string {
 	if n == nil {
 		return ""
@@ -791,7 +801,7 @@ func buildBFSHTML(n *BFSNode) string {
 }
 
 // ----------------------------------------------------------------------
-// 12) MAIN
+// 13) MAIN
 // ----------------------------------------------------------------------
 
 func main() {
@@ -821,15 +831,15 @@ func main() {
 	var tomlSections []BFSSection
 	var totalToml int
 	for _, tf := range tomlFiles {
-		dMap, err := parseTomlFile(tf)
+		dmap, err := parseTomlFile(tf)
 		if err != nil {
 			fmt.Printf("Error parse TOML => %s => %v\n", tf, err)
 			continue
 		}
-		if dMap == nil {
+		if len(dmap) == 0 {
 			continue
 		}
-		tSec := doBFSForDirect(dMap, tf, "toml")
+		tSec := doBFSForDirect(dmap, tf, "toml")
 		tomlSections = append(tomlSections, tSec)
 		totalToml += len(tSec.Flattened)
 	}
@@ -839,12 +849,15 @@ func main() {
 	var gradleSections []BFSSection
 	var totalGradle int
 	for _, gf := range gradleFiles {
-		dMap, err := parseBuildGradleFile(gf)
+		dmap, err := parseBuildGradleFile(gf)
 		if err != nil {
 			fmt.Printf("Error parse Gradle => %s => %v\n", gf, err)
 			continue
 		}
-		gSec := doBFSForDirect(dMap, gf, "gradle")
+		if len(dmap) == 0 {
+			continue
+		}
+		gSec := doBFSForDirect(dmap, gf, "gradle")
 		gradleSections = append(gradleSections, gSec)
 		totalGradle += len(gSec.Flattened)
 	}
@@ -856,7 +869,7 @@ func main() {
 	close(pomRequests)
 	wgWorkers.Wait()
 
-	// count copyleft
+	// final counts
 	copyleftCount := 0
 	for _, s := range pomSections {
 		for _, fd := range s.Flattened {
@@ -883,11 +896,16 @@ func main() {
 	summary := fmt.Sprintf("POM total: %d, TOML total: %d, Gradle total: %d, Copyleft: %d",
 		totalPom, totalToml, totalGradle, copyleftCount)
 
-	data := finalData{
-		Summary:        summary,
-		PomSections:    pomSections,
-		TomlSections:   tomlSections,
-		GradleSections: gradleSections,
+	data := struct {
+		Summary        string
+		PomSections    []BFSSection
+		TomlSections   []BFSSection
+		GradleSections []BFSSection
+	}{
+		summary,
+		pomSections,
+		tomlSections,
+		gradleSections,
 	}
 
 	funcMap := template.FuncMap{
@@ -896,6 +914,7 @@ func main() {
 			return template.HTML(buildBFSHTML(n))
 		},
 	}
+
 	tmpl, err := template.New("report").Funcs(funcMap).Parse(finalTemplate)
 	if err != nil {
 		fmt.Println("Template parse error =>", err)
