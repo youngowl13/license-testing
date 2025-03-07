@@ -21,8 +21,8 @@ import (
 // CONFIGURATION
 // ----------------------------------------------------------------------
 const (
-	localPOMCacheDir = ".pom-cache"     // on-disk cache (structure in place for future enhancement)
-	pomWorkerCount   = 10               // number of concurrent POM fetch workers
+	localPOMCacheDir = ".pom-cache"     // On-disk cache directory (structure in place for future enhancement)
+	pomWorkerCount   = 10               // Number of concurrent POM fetch workers
 	fetchTimeout     = 30 * time.Second // HTTP client timeout
 	outputReport     = "license-checker/dependency-license-report.html"
 )
@@ -345,24 +345,21 @@ func parseVersionRange(v string) string {
 // ----------------------------------------------------------------------
 // BFS & LICENSE FETCH FUNCTIONS
 // ----------------------------------------------------------------------
+
+// skipScope returns true if a dependency should be skipped (non-runtime scopes or optional)
 func skipScope(scope, optional string) bool {
 	s := strings.ToLower(strings.TrimSpace(scope))
-	if s == "test" || s == "provided" || s == "system" {
-		return true
-	}
-	if strings.EqualFold(strings.TrimSpace(optional), "true") {
-		return true
-	}
-	return false
+	return s == "test" || s == "provided" || s == "system" || strings.EqualFold(strings.TrimSpace(optional), "true")
 }
 
-// We'll use a visited map that maps dependency keys ("group/artifact@version") to a set (map[string]bool)
-// of direct introducer coordinates.
+// introducerSet is a set of direct introducer coordinates.
 type introducerSet map[string]bool
 
 // ----------------------------------------------------------------------
-// UTILITY FUNCTIONS (Unique Definitions)
+// UTILITY FUNCTIONS
 // ----------------------------------------------------------------------
+
+// splitGA splits a "group/artifact" string into its components.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -371,7 +368,7 @@ func splitGA(ga string) (string, string) {
 	return parts[0], parts[1]
 }
 
-// setIntroducedBy assigns the direct dependency (root) that introduced each transitive dependency.
+// setIntroducedBy recursively assigns the direct introducer(s) for each transitive dependency.
 func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
 	for _, child := range node.Transitive {
 		key := child.Name + "@" + child.Version
@@ -395,13 +392,9 @@ func isCopyleft(name string) bool {
 	copyleftKeywords := []string{
 		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
 		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
-		"GNU General Public License",
-		"GNU Lesser General Public License",
-		"Mozilla Public License",
-		"Common Development and Distribution License",
-		"Eclipse Public License",
-		"Common Public License",
-		"European Union Public License",
+		"GNU General Public License", "GNU Lesser General Public License",
+		"Mozilla Public License", "Common Development and Distribution License",
+		"Eclipse Public License", "Common Public License", "European Union Public License",
 		"Open Software License",
 	}
 	up := strings.ToUpper(name)
@@ -524,9 +517,7 @@ func pomFetchWorker() {
 // ----------------------------------------------------------------------
 // BFS & TRANSITIVE DEPENDENCY RESOLUTION
 // ----------------------------------------------------------------------
-// We use a visited map that maps dependency key ("group/artifact@version") to a set of direct introducer coordinates.
-type introducerSet map[string]bool
-
+// The BFS uses a visited map that maps dependency keys ("group/artifact@version") to a set of direct introducers.
 type queueItem struct {
 	GroupArtifact string
 	Version       string
@@ -613,11 +604,9 @@ func buildTransitiveClosure(sections []ReportSection) {
 					}
 				}
 				childKey := childGA + "@" + cv
-				// Update visited: if already visited, add new direct introducer if not present.
 				if vs, exists := visited[childKey]; exists {
 					if !vs[it.Direct] {
 						vs[it.Direct] = true
-						// Update AllDeps: append this direct introducer.
 						existing := allDeps[childKey]
 						if existing.IntroducedBy == "" {
 							existing.IntroducedBy = it.Direct
@@ -625,7 +614,6 @@ func buildTransitiveClosure(sections []ReportSection) {
 							existing.IntroducedBy = existing.IntroducedBy + ", " + it.Direct
 						}
 						allDeps[childKey] = existing
-						// Enqueue again for new direct introducer.
 						childNode := &DependencyNode{
 							Name:    childGA,
 							Version: cv,
@@ -675,7 +663,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 		for _, root := range rootNodes {
 			fillDepMap(root, allDeps)
 		}
-		// Mark top-level introducers: each direct dependency is the introducer for its descendants.
+		// Mark top-level introducers.
 		for _, root := range rootNodes {
 			rootCoord := fmt.Sprintf("%s:%s", root.Name, root.Version)
 			setIntroducedBy(root, rootCoord, allDeps)
