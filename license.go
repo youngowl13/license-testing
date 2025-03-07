@@ -21,7 +21,7 @@ import (
 // CONFIGURATION
 // ----------------------------------------------------------------------
 const (
-	localPOMCacheDir = ".pom-cache"     // On-disk caching directory (structure in place for future enhancement)
+	localPOMCacheDir = ".pom-cache"     // On-disk cache directory (structure in place for future enhancement)
 	pomWorkerCount   = 10               // Number of concurrent POM fetch workers
 	fetchTimeout     = 30 * time.Second // HTTP client timeout
 	outputReport     = "license-checker/dependency-license-report.html"
@@ -111,7 +111,7 @@ type DependencyNode struct {
 	Copyleft   bool
 	Parent     string // "direct" or parent's coordinate ("group/artifact:version")
 	Transitive []*DependencyNode
-	UsedPOMURL string // URL used to fetch the POM for this node
+	UsedPOMURL string // URL used to fetch this node's POM
 }
 
 // ExtendedDep holds final dependency info for the HTML report.
@@ -120,7 +120,7 @@ type ExtendedDep struct {
 	Lookup       string // version used for URL construction
 	Parent       string // immediate parent ("direct" if top-level)
 	License      string
-	IntroducedBy string // one or more direct dependency coordinates (comma-separated)
+	IntroducedBy string // direct dependency (or comma-separated list) that introduced this dependency
 	PomURL       string // actual POM URL used during fetch
 }
 
@@ -355,7 +355,7 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-// splitGA splits a "group/artifact" string.
+// splitGA splits a "group/artifact" string into group and artifact.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -512,7 +512,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 				Lookup:       ver,
 				Parent:       "direct",
 				License:      "",
-				IntroducedBy: "", // For direct dependencies, we'll leave this empty
+				IntroducedBy: "", // For direct dependencies, no introducer needed.
 				PomURL:       "",
 			}
 		}
@@ -646,6 +646,7 @@ func fillDepMap(node *DependencyNode, all map[string]ExtendedDep) {
 	}
 }
 
+// setIntroducedBy assigns the direct dependency (root) that introduced each transitive dependency.
 func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
 	for _, child := range node.Transitive {
 		key := child.Name + "@" + child.Version
@@ -794,14 +795,16 @@ func generateHTMLReport(sections []ReportSection) error {
 			})
 			return keys
 		},
-		"parseCoord": parseCoord,
-		"parseVersion": parseVersion,
-		"buildRepoLink": func(depWithVer string) string {
-			return buildRepoLink(depWithVer)
+		"parseCoord": func(dep string) string { return strings.SplitN(dep, "@", 2)[0] },
+		"parseVersion": func(dep string) string {
+			parts := strings.SplitN(dep, "@", 2)
+			if len(parts) < 2 {
+				return ""
+			}
+			return parts[1]
 		},
-		"buildPOMLink": func(depWithVer string) string {
-			return buildPOMLink(depWithVer)
-		},
+		"buildRepoLink": buildRepoLink,
+		"buildPOMLink":  buildPOMLink,
 	}
 	tmpl, err := template.New("report").Funcs(funcMap).Parse(tmplText)
 	if err != nil {
@@ -872,7 +875,11 @@ func buildPOMLink(depWithVer string) string {
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, cleanVer, artifact, cleanVer)
 }
 
-// splitGA splits a "group/artifact" string.
+// ----------------------------------------------------------------------
+// SINGLE DEFINITIONS (no duplicates)
+// ----------------------------------------------------------------------
+
+// splitGA is defined only once.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -900,7 +907,7 @@ func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]Exte
 // MAIN FUNCTION
 // ----------------------------------------------------------------------
 func main() {
-	// Start POM fetch worker pool.
+	// Start the POM fetch worker pool.
 	for i := 0; i < pomWorkerCount; i++ {
 		wgWorkers.Add(1)
 		go pomFetchWorker()
@@ -974,7 +981,7 @@ func main() {
 	fmt.Println("Starting BFS to resolve transitive dependencies...")
 	buildTransitiveClosure(sections)
 
-	// Shut down worker pool.
+	// Shut down the worker pool.
 	channelMutex.Lock()
 	channelOpen = false
 	channelMutex.Unlock()
