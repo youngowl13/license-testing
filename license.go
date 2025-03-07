@@ -21,7 +21,7 @@ import (
 // CONFIGURATION
 // ----------------------------------------------------------------------
 const (
-	localPOMCacheDir = ".pom-cache"     // on-disk cache directory (structure in place for future enhancement)
+	localPOMCacheDir = ".pom-cache"     // on-disk cache (structure in place for future enhancement)
 	pomWorkerCount   = 10               // number of concurrent POM fetch workers
 	fetchTimeout     = 30 * time.Second // HTTP client timeout
 	outputReport     = "license-checker/dependency-license-report.html"
@@ -112,7 +112,7 @@ type DependencyNode struct {
 	Parent     string // "direct" or parent's coordinate ("group/artifact:version")
 	Transitive []*DependencyNode
 	UsedPOMURL string // URL used to fetch this node's POM
-	Direct     string // direct introducer (e.g. "group/artifact:version") for this path
+	Direct     string // the direct dependency coordinate that introduced this node
 }
 
 // ExtendedDep holds final dependency info for the HTML report.
@@ -121,7 +121,7 @@ type ExtendedDep struct {
 	Lookup       string // version used for URL construction
 	Parent       string // immediate parent ("direct" if top-level)
 	License      string
-	IntroducedBy string // comma-separated list of direct dependency coordinates responsible
+	IntroducedBy string // comma-separated list of direct dependencies that introduced this dependency
 	PomURL       string // actual POM URL used during fetch
 }
 
@@ -356,14 +356,13 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-// We use a modified visited map where each dependency key maps to a set of direct introducer coordinates.
+// We'll use a visited map that maps dependency keys ("group/artifact@version") to a set (map[string]bool)
+// of direct introducer coordinates.
 type introducerSet map[string]bool
 
 // ----------------------------------------------------------------------
 // UTILITY FUNCTIONS (Unique Definitions)
 // ----------------------------------------------------------------------
-
-// splitGA splits a "group/artifact" string into its components.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -372,159 +371,63 @@ func splitGA(ga string) (string, string) {
 	return parts[0], parts[1]
 }
 
-// ----------------------------------------------------------------------
-// BFS: Updated to accumulate direct introducers for each dependency.
-// ----------------------------------------------------------------------
-type queueItem struct {
-	GroupArtifact string
-	Version       string
-	Depth         int
-	ParentNode    *DependencyNode
-	Direct        string // direct dependency coordinate that initiated this path
+// setIntroducedBy assigns the direct dependency (root) that introduced each transitive dependency.
+func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
+	for _, child := range node.Transitive {
+		key := child.Name + "@" + child.Version
+		inf := all[key]
+		if inf.IntroducedBy == "" {
+			inf.IntroducedBy = rootCoord
+		} else if !strings.Contains(inf.IntroducedBy, rootCoord) {
+			inf.IntroducedBy = inf.IntroducedBy + ", " + rootCoord
+		}
+		all[key] = inf
+		setIntroducedBy(child, rootCoord, all)
+	}
 }
 
-func buildTransitiveClosure(sections []ReportSection) {
-	for i := range sections {
-		sec := &sections[i]
-		fmt.Printf("[BFS] Building transitive closure for %s\n", sec.FilePath)
-		allDeps := make(map[string]ExtendedDep)
-		// Add direct dependencies.
-		for ga, ver := range sec.DirectDeps {
-			key := ga + "@" + ver
-			allDeps[key] = ExtendedDep{
-				Display:      ver,
-				Lookup:       ver,
-				Parent:       "direct",
-				License:      "",
-				IntroducedBy: "", // For direct dependencies, remains empty
-				PomURL:       "",
-			}
+func isCopyleft(name string) bool {
+	for spdxID, data := range spdxLicenseMap {
+		if data.Copyleft && (strings.EqualFold(name, data.Name) || strings.EqualFold(name, spdxID)) {
+			return true
 		}
-		// visited: key -> set of direct introducer coordinates
-		visited := make(map[string]introducerSet)
-		var queue []queueItem
-		var rootNodes []*DependencyNode
-		// Initialize BFS with direct dependencies.
-		for ga, ver := range sec.DirectDeps {
-			key := ga + "@" + ver
-			ds := make(introducerSet)
-			ds[key] = true
-			visited[key] = ds
-			node := &DependencyNode{
-				Name:    ga,
-				Version: ver,
-				Parent:  "direct",
-				Direct:  key,
-			}
-			rootNodes = append(rootNodes, node)
-			queue = append(queue, queueItem{
-				GroupArtifact: ga,
-				Version:       ver,
-				Depth:         1,
-				ParentNode:    node,
-				Direct:        key,
-			})
-		}
-		// BFS loop.
-		for len(queue) > 0 {
-			it := queue[0]
-			queue = queue[1:]
-			fmt.Printf("[BFS] Processing => %s@%s (depth=%d, direct=%s)\n", it.GroupArtifact, it.Version, it.Depth, it.Direct)
-			group, artifact := splitGA(it.GroupArtifact)
-			if group == "" || artifact == "" {
-				continue
-			}
-			if strings.ToLower(it.Version) == "unknown" {
-				continue
-			}
-			pom, usedURL, err := concurrentFetchPOM(group, artifact, it.Version)
-			if err != nil || pom == nil {
-				continue
-			}
-			if it.ParentNode != nil {
-				lic := detectLicense(pom)
-				it.ParentNode.License = lic
-				it.ParentNode.Copyleft = isCopyleft(lic)
-				it.ParentNode.UsedPOMURL = usedURL
-			}
-			for _, d := range pom.Dependencies {
-				if skipScope(d.Scope, d.Optional) {
-					continue
-				}
-				childGA := d.GroupID + "/" + d.ArtifactID
-				cv := d.Version
-				if cv == "" {
-					cv = "unknown"
-				} else {
-					cv = parseVersionRange(cv)
-					if cv == "" {
-						cv = "unknown"
-					}
-				}
-				childKey := childGA + "@" + cv
-				// Update visited: if already visited with a different direct introducer, add it.
-				if vs, exists := visited[childKey]; exists {
-					if !vs[it.Direct] {
-						vs[it.Direct] = true
-						// Also update AllDeps: append this direct introducer.
-						existing := allDeps[childKey]
-						if existing.IntroducedBy == "" {
-							existing.IntroducedBy = it.Direct
-						} else if !strings.Contains(existing.IntroducedBy, it.Direct) {
-							existing.IntroducedBy = existing.IntroducedBy + ", " + it.Direct
-						}
-						allDeps[childKey] = existing
-						// Enqueue the node again with the new direct introducer.
-						childNode := &DependencyNode{
-							Name:    childGA,
-							Version: cv,
-							Parent:  fmt.Sprintf("%s:%s", it.GroupArtifact, it.Version),
-							Direct:  it.Direct,
-						}
-						// Append to parent's transitive if not already present.
-						it.ParentNode.Transitive = append(it.ParentNode.Transitive, childNode)
-						queue = append(queue, queueItem{
-							GroupArtifact: childGA,
-							Version:       cv,
-							Depth:         it.Depth + 1,
-							ParentNode:    childNode,
-							Direct:        it.Direct,
-						})
-					}
-					// Already visited with this introducer: do nothing.
-					continue
-				} else {
-					visited[childKey] = make(introducerSet)
-					visited[childKey][it.Direct] = true
-				}
-				fmt.Printf("[BFS]   Discovered child => %s@%s (parent=%s:%s, direct=%s)\n", childGA, cv, it.GroupArtifact, it.Version, it.Direct)
-				childNode := &DependencyNode{
-					Name:    childGA,
-					Version: cv,
-					Parent:  fmt.Sprintf("%s:%s", it.GroupArtifact, it.Version),
-					Direct:  it.Direct,
-				}
-				allDeps[childKey] = ExtendedDep{
-					Display:      cv,
-					Lookup:       cv,
-					Parent:       fmt.Sprintf("%s:%s", it.GroupArtifact, it.Version),
-					License:      "",
-					IntroducedBy: it.Direct,
-					PomURL:       "",
-				}
-				it.ParentNode.Transitive = append(it.ParentNode.Transitive, childNode)
-				queue = append(queue, queueItem{
-					GroupArtifact: childGA,
-					Version:       cv,
-					Depth:         it.Depth + 1,
-					ParentNode:    childNode,
-					Direct:        it.Direct,
-				})
-			}
-		}
-		sec.AllDeps = allDeps
-		sec.DependencyTree = rootNodes
 	}
+	copyleftKeywords := []string{
+		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
+		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
+		"GNU General Public License",
+		"GNU Lesser General Public License",
+		"Mozilla Public License",
+		"Common Development and Distribution License",
+		"Eclipse Public License",
+		"Common Public License",
+		"European Union Public License",
+		"Open Software License",
+	}
+	up := strings.ToUpper(name)
+	for _, kw := range copyleftKeywords {
+		if strings.Contains(up, strings.ToUpper(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectLicense(pom *MavenPOM) string {
+	if pom == nil || len(pom.Licenses) == 0 {
+		return "Unknown"
+	}
+	lic := strings.TrimSpace(pom.Licenses[0].Name)
+	if lic == "" {
+		return "Unknown"
+	}
+	up := strings.ToUpper(lic)
+	for spdxID, data := range spdxLicenseMap {
+		if strings.EqualFold(lic, spdxID) || up == strings.ToUpper(spdxID) {
+			return data.Name
+		}
+	}
+	return lic
 }
 
 // ----------------------------------------------------------------------
@@ -615,6 +518,196 @@ func pomFetchWorker() {
 		fmt.Printf("[WORKER] Processing => %s\n", key)
 		pom, usedURL, err := fetchRemotePOM(req.GroupID, req.ArtifactID, req.Version)
 		req.ResultChan <- fetchResult{POM: pom, UsedURL: usedURL, Err: err}
+	}
+}
+
+// ----------------------------------------------------------------------
+// BFS & TRANSITIVE DEPENDENCY RESOLUTION
+// ----------------------------------------------------------------------
+// We use a visited map that maps dependency key ("group/artifact@version") to a set of direct introducer coordinates.
+type introducerSet map[string]bool
+
+type queueItem struct {
+	GroupArtifact string
+	Version       string
+	Depth         int
+	ParentNode    *DependencyNode
+	Direct        string // the direct dependency coordinate that initiated this path
+}
+
+func buildTransitiveClosure(sections []ReportSection) {
+	for i := range sections {
+		sec := &sections[i]
+		fmt.Printf("[BFS] Building transitive closure for %s\n", sec.FilePath)
+		allDeps := make(map[string]ExtendedDep)
+		// Add direct dependencies.
+		for ga, ver := range sec.DirectDeps {
+			key := ga + "@" + ver
+			allDeps[key] = ExtendedDep{
+				Display:      ver,
+				Lookup:       ver,
+				Parent:       "direct",
+				License:      "",
+				IntroducedBy: "",
+				PomURL:       "",
+			}
+		}
+		visited := make(map[string]introducerSet)
+		var queue []queueItem
+		var rootNodes []*DependencyNode
+		// Initialize BFS with direct dependencies.
+		for ga, ver := range sec.DirectDeps {
+			key := ga + "@" + ver
+			ds := make(introducerSet)
+			ds[key] = true
+			visited[key] = ds
+			node := &DependencyNode{
+				Name:    ga,
+				Version: ver,
+				Parent:  "direct",
+				Direct:  key,
+			}
+			rootNodes = append(rootNodes, node)
+			queue = append(queue, queueItem{
+				GroupArtifact: ga,
+				Version:       ver,
+				Depth:         1,
+				ParentNode:    node,
+				Direct:        key,
+			})
+		}
+		// BFS loop.
+		for len(queue) > 0 {
+			it := queue[0]
+			queue = queue[1:]
+			fmt.Printf("[BFS] Processing => %s@%s (depth=%d, direct=%s)\n", it.GroupArtifact, it.Version, it.Depth, it.Direct)
+			group, artifact := splitGA(it.GroupArtifact)
+			if group == "" || artifact == "" {
+				continue
+			}
+			if strings.ToLower(it.Version) == "unknown" {
+				continue
+			}
+			pom, usedURL, err := concurrentFetchPOM(group, artifact, it.Version)
+			if err != nil || pom == nil {
+				continue
+			}
+			if it.ParentNode != nil {
+				lic := detectLicense(pom)
+				it.ParentNode.License = lic
+				it.ParentNode.Copyleft = isCopyleft(lic)
+				it.ParentNode.UsedPOMURL = usedURL
+			}
+			for _, d := range pom.Dependencies {
+				if skipScope(d.Scope, d.Optional) {
+					continue
+				}
+				childGA := d.GroupID + "/" + d.ArtifactID
+				cv := d.Version
+				if cv == "" {
+					cv = "unknown"
+				} else {
+					cv = parseVersionRange(cv)
+					if cv == "" {
+						cv = "unknown"
+					}
+				}
+				childKey := childGA + "@" + cv
+				// Update visited: if already visited, add new direct introducer if not present.
+				if vs, exists := visited[childKey]; exists {
+					if !vs[it.Direct] {
+						vs[it.Direct] = true
+						// Update AllDeps: append this direct introducer.
+						existing := allDeps[childKey]
+						if existing.IntroducedBy == "" {
+							existing.IntroducedBy = it.Direct
+						} else if !strings.Contains(existing.IntroducedBy, it.Direct) {
+							existing.IntroducedBy = existing.IntroducedBy + ", " + it.Direct
+						}
+						allDeps[childKey] = existing
+						// Enqueue again for new direct introducer.
+						childNode := &DependencyNode{
+							Name:    childGA,
+							Version: cv,
+							Parent:  fmt.Sprintf("%s:%s", it.GroupArtifact, it.Version),
+							Direct:  it.Direct,
+						}
+						it.ParentNode.Transitive = append(it.ParentNode.Transitive, childNode)
+						queue = append(queue, queueItem{
+							GroupArtifact: childGA,
+							Version:       cv,
+							Depth:         it.Depth + 1,
+							ParentNode:    childNode,
+							Direct:        it.Direct,
+						})
+					}
+					continue
+				} else {
+					visited[childKey] = make(introducerSet)
+					visited[childKey][it.Direct] = true
+				}
+				fmt.Printf("[BFS]   Discovered child => %s@%s (parent=%s:%s, direct=%s)\n", childGA, cv, it.GroupArtifact, it.Version, it.Direct)
+				childNode := &DependencyNode{
+					Name:    childGA,
+					Version: cv,
+					Parent:  fmt.Sprintf("%s:%s", it.GroupArtifact, it.Version),
+					Direct:  it.Direct,
+				}
+				allDeps[childKey] = ExtendedDep{
+					Display:      cv,
+					Lookup:       cv,
+					Parent:       fmt.Sprintf("%s:%s", it.GroupArtifact, it.Version),
+					License:      "",
+					IntroducedBy: it.Direct,
+					PomURL:       "",
+				}
+				it.ParentNode.Transitive = append(it.ParentNode.Transitive, childNode)
+				queue = append(queue, queueItem{
+					GroupArtifact: childGA,
+					Version:       cv,
+					Depth:         it.Depth + 1,
+					ParentNode:    childNode,
+					Direct:        it.Direct,
+				})
+			}
+		}
+		// Fill BFS results.
+		for _, root := range rootNodes {
+			fillDepMap(root, allDeps)
+		}
+		// Mark top-level introducers: each direct dependency is the introducer for its descendants.
+		for _, root := range rootNodes {
+			rootCoord := fmt.Sprintf("%s:%s", root.Name, root.Version)
+			setIntroducedBy(root, rootCoord, allDeps)
+		}
+		sec.AllDeps = allDeps
+		sec.DependencyTree = rootNodes
+	}
+}
+
+func fillDepMap(node *DependencyNode, all map[string]ExtendedDep) {
+	key := node.Name + "@" + node.Version
+	info, exists := all[key]
+	if !exists {
+		info = ExtendedDep{
+			Display: node.Version,
+			Lookup:  node.Version,
+			Parent:  node.Parent,
+			PomURL:  node.UsedPOMURL,
+		}
+	} else {
+		if node.UsedPOMURL != "" {
+			info.PomURL = node.UsedPOMURL
+		}
+	}
+	if node.License == "" {
+		info.License = "Unknown"
+	} else {
+		info.License = node.License
+	}
+	all[key] = info
+	for _, child := range node.Transitive {
+		fillDepMap(child, all)
 	}
 }
 
@@ -781,7 +874,7 @@ func generateHTMLReport(sections []ReportSection) error {
 }
 
 // ----------------------------------------------------------------------
-// UTILITY FUNCTIONS (Unique Definitions)
+// ADDITIONAL UTILITY FUNCTIONS
 // ----------------------------------------------------------------------
 func parseCoord(dep string) string {
 	parts := strings.SplitN(dep, "@", 2)
@@ -808,7 +901,6 @@ func categoryRank(license string) int {
 func buildRepoLink(depWithVer string) string {
 	ga := parseCoord(depWithVer)
 	ver := parseVersion(depWithVer)
-	// Clean version: remove square brackets or parentheses.
 	cleanVer := strings.Trim(ver, "[]()")
 	group, artifact := splitGA(ga)
 	if group == "" || artifact == "" {
