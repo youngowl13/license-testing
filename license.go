@@ -21,7 +21,7 @@ import (
 // CONFIGURATION
 // ----------------------------------------------------------------------
 const (
-	localPOMCacheDir = ".pom-cache"     // On-disk cache directory (structure in place for future use)
+	localPOMCacheDir = ".pom-cache"     // (On-disk caching structure; not fully implemented)
 	pomWorkerCount   = 10               // Number of concurrent POM fetch workers
 	fetchTimeout     = 30 * time.Second // HTTP client timeout
 	outputReport     = "license-checker/dependency-license-report.html"
@@ -50,7 +50,7 @@ type fetchRequest struct {
 
 type fetchResult struct {
 	POM     *MavenPOM
-	UsedURL string // The URL from which the POM was successfully fetched
+	UsedURL string // URL from which the POM was fetched
 	Err     error
 }
 
@@ -103,18 +103,18 @@ type MavenPOM struct {
 	} `xml:"parent"`
 }
 
-// DependencyNode represents a node in the dependency tree.
+// DependencyNode represents a node in the BFS dependency tree.
 type DependencyNode struct {
 	Name       string
 	Version    string
 	License    string
 	Copyleft   bool
-	Parent     string // "direct" or immediate parent's coordinate ("group/artifact:version")
+	Parent     string // "direct" or parent's coordinate ("group/artifact:version")
 	Transitive []*DependencyNode
-	UsedPOMURL string // the URL used to fetch the POM for this node
+	UsedPOMURL string // URL used to fetch the POM for this node
 }
 
-// ExtendedDep holds final dependency info for the HTML table.
+// ExtendedDep holds final dependency info for the report.
 type ExtendedDep struct {
 	Display      string // version to display
 	Lookup       string // version used in link construction
@@ -234,9 +234,9 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 		if len(parts) != 2 {
 			continue
 		}
-		g := parts[0]
-		a := parts[1]
-		key := fmt.Sprintf("%s/%s", g, a)
+		group := parts[0]
+		artifact := parts[1]
+		key := fmt.Sprintf("%s/%s", group, artifact)
 		deps[key] = versionVal
 	}
 	return deps, nil
@@ -353,14 +353,6 @@ func skipScope(scope, optional string) bool {
 		return true
 	}
 	return false
-}
-
-func splitGA(ga string) (string, string) {
-	parts := strings.Split(ga, "/")
-	if len(parts) != 2 {
-		return "", ""
-	}
-	return parts[0], parts[1]
 }
 
 func isCopyleft(name string) bool {
@@ -496,7 +488,7 @@ func pomFetchWorker() {
 }
 
 // ----------------------------------------------------------------------
-// BFS TRANSITIVE DEPENDENCY RESOLUTION
+// BFS & TRANSITIVE DEPENDENCY RESOLUTION
 // ----------------------------------------------------------------------
 func buildTransitiveClosure(sections []ReportSection) {
 	for i := range sections {
@@ -790,7 +782,7 @@ func generateHTMLReport(sections []ReportSection) error {
 			})
 			return keys
 		},
-		"parseCoord":   parseCoord,
+		"parseCoord": parseCoord,
 		"parseVersion": parseVersion,
 		"buildRepoLink": func(depWithVer string) string {
 			return buildRepoLink(depWithVer)
@@ -866,7 +858,6 @@ func buildPOMLink(depWithVer string) string {
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, ver, artifact, ver)
 }
 
-// splitGA splits a "group/artifact" string into its parts.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -960,7 +951,7 @@ func main() {
 	close(pomRequests)
 	wgWorkers.Wait()
 
-	// Compute summary counts for each section.
+	// Compute summary counts.
 	for i := range sections {
 		sec := &sections[i]
 		var directCount, indirectCount, copyleftCount, unknownCount int
