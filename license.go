@@ -21,8 +21,8 @@ import (
 // CONFIGURATION
 // ----------------------------------------------------------------------
 const (
-	localPOMCacheDir = ".pom-cache"     // on-disk cache directory for fetched POMs
-	pomWorkerCount   = 10               // number of concurrent workers for POM fetching
+	localPOMCacheDir = ".pom-cache"     // On-disk cache directory for fetched POMs
+	pomWorkerCount   = 10               // Number of concurrent workers for POM fetching
 	fetchTimeout     = 30 * time.Second // HTTP client timeout
 	outputReport     = "license-checker/dependency-license-report.html"
 )
@@ -39,7 +39,7 @@ var (
 )
 
 // ----------------------------------------------------------------------
-// TYPES USED FOR CONCURRENCY
+// TYPES FOR CONCURRENCY
 // ----------------------------------------------------------------------
 type fetchRequest struct {
 	GroupID    string
@@ -108,25 +108,25 @@ type DependencyNode struct {
 	Version    string
 	License    string
 	Copyleft   bool
-	Parent     string // "direct" or immediate parent's coordinate ("group/artifact:version")
+	Parent     string // "direct" or parent's coordinate ("group/artifact:version")
 	Transitive []*DependencyNode
 }
 
 // ExtendedDep holds final dependency information for the report.
 type ExtendedDep struct {
-	Display      string // version to display
-	Lookup       string // version used for links
-	Parent       string // immediate parent ("direct" if top-level)
+	Display      string // Version to display
+	Lookup       string // Version used for constructing links
+	Parent       string // Immediate parent ("direct" if top-level)
 	License      string
-	IntroducedBy string // top-level dependency that introduced this node
+	IntroducedBy string // Top-level dependency that introduced this node
 }
 
-// ReportSection holds all dependency information for one source file.
+// ReportSection holds dependency information for one source file.
 type ReportSection struct {
 	FilePath        string
-	DirectDeps      map[string]string          // "group/artifact" -> version
-	AllDeps         map[string]ExtendedDep     // "group/artifact@version" -> ExtendedDep
-	DependencyTree  []*DependencyNode          // BFS dependency tree
+	DirectDeps      map[string]string      // "group/artifact" -> version
+	AllDeps         map[string]ExtendedDep // "group/artifact@version" -> ExtendedDep
+	DependencyTree  []*DependencyNode      // BFS dependency tree
 	TransitiveCount int
 	DirectCount     int
 	IndirectCount   int
@@ -138,7 +138,7 @@ type ReportSection struct {
 // FILE DISCOVERY & PARSING FUNCTIONS
 // ----------------------------------------------------------------------
 
-// findAllPOMFiles recursively finds all pom.xml files.
+// findAllPOMFiles recursively finds all pom.xml files in the given root.
 func findAllPOMFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -153,7 +153,7 @@ func findAllPOMFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// parseOneLocalPOMFile reads a pom.xml and extracts direct dependencies.
+// parseOneLocalPOMFile reads a pom.xml and extracts its direct dependencies.
 func parseOneLocalPOMFile(filePath string) (map[string]string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -195,7 +195,7 @@ func findAllTOMLFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// parseTOMLFile parses a libs.versions.toml file and returns direct dependencies.
+// parseTOMLFile parses a libs.versions.toml file and returns its direct dependencies.
 func parseTOMLFile(filePath string) (map[string]string, error) {
 	deps := make(map[string]string)
 	tree, err := toml.LoadFile(filePath)
@@ -280,7 +280,7 @@ func findAllGradleFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// parseBuildGradleFile parses a Gradle build file and extracts direct dependencies.
+// parseBuildGradleFile parses a Gradle build file and extracts its direct dependencies.
 func parseBuildGradleFile(filePath string) (map[string]string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -322,7 +322,7 @@ func parseBuildGradleFile(filePath string) (map[string]string, error) {
 	return deps, nil
 }
 
-// parseGradleVariables extracts variable definitions from a Gradle file.
+// parseGradleVariables extracts variable assignments from a Gradle file.
 func parseGradleVariables(content string) map[string]string {
 	vars := make(map[string]string)
 	re := regexp.MustCompile(`(?m)^\s*def\s+(\w+)\s*=\s*["']([^"']+)["']`)
@@ -335,7 +335,7 @@ func parseGradleVariables(content string) map[string]string {
 	return vars
 }
 
-// parseVersionRange returns a concrete version if v is a range.
+// parseVersionRange returns a concrete version if v is a version range.
 func parseVersionRange(v string) string {
 	v = strings.TrimSpace(v)
 	if (strings.HasPrefix(v, "[") || strings.HasPrefix(v, "(")) && strings.Contains(v, ",") {
@@ -349,10 +349,10 @@ func parseVersionRange(v string) string {
 }
 
 // ----------------------------------------------------------------------
-// BFS TRANSITIVE DEPENDENCY RESOLUTION FUNCTIONS
+// BFS TRANSITIVE DEPENDENCY RESOLUTION
 // ----------------------------------------------------------------------
 
-// skipScope returns true if the dependency scope is non-runtime or optional.
+// skipScope returns true if the dependency's scope is to be skipped.
 func skipScope(scope, optional string) bool {
 	s := strings.ToLower(strings.TrimSpace(scope))
 	if s == "test" || s == "provided" || s == "system" {
@@ -364,7 +364,7 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-// splitGA splits "group/artifact" into group and artifact.
+// splitGA splits a "group/artifact" string into its components.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -419,13 +419,13 @@ func detectLicense(pom *MavenPOM) string {
 	return lic
 }
 
-// fetchRemotePOM attempts to fetch a POM from Maven Central (primary) or Google Maven (fallback).
+// fetchRemotePOM attempts to fetch a POM from Maven Central or Google Maven.
 func fetchRemotePOM(group, artifact, version string) (*MavenPOM, error) {
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	urlCentral := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, version, artifact, version)
 	urlGoogle := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, version, artifact, version)
 	client := http.Client{Timeout: fetchTimeout}
-	// Try Maven Central
+	// Try Maven Central.
 	resp, err := client.Get(urlCentral)
 	if err == nil && resp.StatusCode == 200 {
 		defer resp.Body.Close()
@@ -512,7 +512,7 @@ func concurrentFetchPOM(group, artifact, version string) (*MavenPOM, error) {
 	return res.POM, res.Err
 }
 
-// pomFetchWorker processes fetch requests from the pomRequests channel.
+// pomFetchWorker processes fetch requests.
 func pomFetchWorker() {
 	defer wgWorkers.Done()
 	for req := range pomRequests {
@@ -525,7 +525,7 @@ func pomFetchWorker() {
 // BFS FOR TRANSITIVE DEPENDENCY RESOLUTION
 // ----------------------------------------------------------------------
 
-// buildTransitiveClosure performs a BFS for each report section.
+// buildTransitiveClosure performs a BFS for each ReportSection.
 func buildTransitiveClosure(sections []ReportSection) {
 	for i := range sections {
 		sec := &sections[i]
@@ -542,6 +542,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 				IntroducedBy: "",
 			}
 		}
+		// Initialize BFS queue.
 		type queueItem struct {
 			GroupArtifact string
 			Version       string
@@ -567,6 +568,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 				ParentNode:    node,
 			})
 		}
+		// BFS loop.
 		for len(queue) > 0 {
 			it := queue[0]
 			queue = queue[1:]
@@ -628,11 +630,11 @@ func buildTransitiveClosure(sections []ReportSection) {
 				})
 			}
 		}
-		// Populate AllDeps with info from the tree.
+		// Populate AllDeps with info from tree nodes.
 		for _, root := range rootNodes {
 			fillDepMap(root, allDeps)
 		}
-		// For each root, record its coordinate as the top-level introducer.
+		// Set top-level introducer.
 		for _, root := range rootNodes {
 			rootCoord := fmt.Sprintf("%s:%s", root.Name, root.Version)
 			setIntroducedBy(root, rootCoord, allDeps)
@@ -642,7 +644,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 	}
 }
 
-// fillDepMap recursively propagates license info into the AllDeps map.
+// fillDepMap recursively fills in license info.
 func fillDepMap(node *DependencyNode, all map[string]ExtendedDep) {
 	key := node.Name + "@" + node.Version
 	info, exists := all[key]
@@ -664,7 +666,7 @@ func fillDepMap(node *DependencyNode, all map[string]ExtendedDep) {
 	}
 }
 
-// setIntroducedBy sets the top-level dependency for each transitive node.
+// setIntroducedBy sets the IntroducedBy field for transitive nodes.
 func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
 	for _, child := range node.Transitive {
 		key := child.Name + "@" + child.Version
@@ -676,10 +678,10 @@ func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]Exte
 }
 
 // ----------------------------------------------------------------------
-// HTML REPORT GENERATION FUNCTIONS
+// HTML REPORT GENERATION
 // ----------------------------------------------------------------------
 
-// buildDependencyTreeHTML recursively builds an HTML tree for a dependency graph.
+// buildDependencyTreeHTML builds HTML for a dependency tree node.
 func buildDependencyTreeHTML(node *DependencyNode, level int) string {
 	class := "non-copyleft"
 	if node.License == "Unknown" {
@@ -700,7 +702,6 @@ func buildDependencyTreeHTML(node *DependencyNode, level int) string {
 
 // buildDependencyTreesHTML builds HTML for all dependency trees.
 func buildDependencyTreesHTML(nodes []*DependencyNode) template.HTML {
-	// Sort root nodes alphabetically.
 	sort.Slice(nodes, func(i, j int) bool {
 		return nodes[i].Name < nodes[j].Name
 	})
@@ -711,23 +712,20 @@ func buildDependencyTreesHTML(nodes []*DependencyNode) template.HTML {
 	return template.HTML(sb.String())
 }
 
-// buildRepoLink constructs a repository URL for a dependency.
-func buildRepoLink(dep string, version string) string {
+// buildRepoLink constructs the repository URL for a dependency.
+func buildRepoLink(dep, version string) string {
 	group, artifact := splitGA(dep)
 	if group == "" || artifact == "" {
 		return fmt.Sprintf("https://www.google.com/search?q=%s+license", dep)
 	}
-	// For Android artifacts, prefer Google Maven.
 	if strings.HasPrefix(group, "com.android") {
-		googleLink := fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", group, artifact, version)
-		return googleLink
+		return fmt.Sprintf("https://maven.google.com/web/index.html#%s:%s:%s", group, artifact, version)
 	}
-	centralLink := fmt.Sprintf("https://mvnrepository.com/artifact/%s/%s/%s", group, artifact, version)
-	return centralLink
+	return fmt.Sprintf("https://mvnrepository.com/artifact/%s/%s/%s", group, artifact, version)
 }
 
-// buildPOMLink constructs a direct link to the POM file.
-func buildPOMLink(dep string, version string) string {
+// buildPOMLink constructs the direct link to the POM file.
+func buildPOMLink(dep, version string) string {
 	group, artifact := splitGA(dep)
 	if group == "" || artifact == "" {
 		return ""
@@ -736,7 +734,7 @@ func buildPOMLink(dep string, version string) string {
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, version, artifact, version)
 }
 
-// categoryRank returns a rank for license categorization.
+// categoryRank returns a rank for sorting: 0 for copyleft, 1 for unknown, 2 for others.
 func categoryRank(license string) int {
 	if isCopyleft(license) {
 		return 0
@@ -746,7 +744,7 @@ func categoryRank(license string) int {
 	return 2
 }
 
-// generateHTMLReport creates the final HTML report.
+// generateHTMLReport generates the HTML report file.
 func generateHTMLReport(sections []ReportSection) error {
 	outDir := "license-checker"
 	if err := os.MkdirAll(outDir, 0755); err != nil {
@@ -801,14 +799,14 @@ func generateHTMLReport(sections []ReportSection) error {
       <tbody>
         {{ $keys := sortKeys .AllDeps }}
         {{ range $i, $dep := $keys }}
-          {{ $info := index $.AllDeps $dep }}
-          {{ if eq $info.License "Unknown" -}}
+          {{ $info := index .AllDeps $dep }}
+          {{ if eq $info.License "Unknown" }}
             <tr class="unknown-license">
-          {{- else if isCopyleft $info.License -}}
+          {{ else if isCopyleft $info.License }}
             <tr class="copyleft">
-          {{- else -}}
+          {{ else }}
             <tr class="non-copyleft">
-          {{- end }}
+          {{ end }}
             <td>{{ $dep }}</td>
             <td>{{ $info.Display }}</td>
             <td>{{ $info.Parent }}</td>
@@ -892,7 +890,7 @@ func generateHTMLReport(sections []ReportSection) error {
 // MAIN FUNCTION
 // ----------------------------------------------------------------------
 func main() {
-	// Start worker pool.
+	// Start the worker pool.
 	for i := 0; i < pomWorkerCount; i++ {
 		wgWorkers.Add(1)
 		go pomFetchWorker()
