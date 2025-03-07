@@ -21,8 +21,8 @@ import (
 // CONFIGURATION
 // ----------------------------------------------------------------------
 const (
-	localPOMCacheDir = ".pom-cache"     // On-disk cache directory (structure in place for future enhancement)
-	pomWorkerCount   = 10               // Number of concurrent POM fetch workers
+	localPOMCacheDir = ".pom-cache"     // on-disk cache directory (structure in place for future enhancement)
+	pomWorkerCount   = 10               // number of concurrent POM fetch workers
 	fetchTimeout     = 30 * time.Second // HTTP client timeout
 	outputReport     = "license-checker/dependency-license-report.html"
 )
@@ -112,7 +112,7 @@ type DependencyNode struct {
 	Parent     string // "direct" or parent's coordinate ("group/artifact:version")
 	Transitive []*DependencyNode
 	UsedPOMURL string // URL used to fetch this node's POM
-	Direct     string // the direct dependency coordinate that introduced this node
+	Direct     string // the direct dependency (group/artifact only) that introduced this node
 }
 
 // ExtendedDep holds final dependency info for the HTML report.
@@ -121,7 +121,7 @@ type ExtendedDep struct {
 	Lookup       string // version used for URL construction
 	Parent       string // immediate parent ("direct" if top-level)
 	License      string
-	IntroducedBy string // comma-separated list of direct dependencies that introduced this dependency
+	IntroducedBy string // comma-separated list of direct dependency names that introduced this dependency
 	PomURL       string // actual POM URL used during fetch
 }
 
@@ -352,14 +352,10 @@ func skipScope(scope, optional string) bool {
 	return s == "test" || s == "provided" || s == "system" || strings.EqualFold(strings.TrimSpace(optional), "true")
 }
 
-// introducerSet is a set of direct introducer coordinates.
+// introducerSet is a set of direct introducer names.
 type introducerSet map[string]bool
 
-// ----------------------------------------------------------------------
-// UTILITY FUNCTIONS
-// ----------------------------------------------------------------------
-
-// splitGA splits a "group/artifact" string into its components.
+// Utility: splitGA splits a "group/artifact" string.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -369,58 +365,18 @@ func splitGA(ga string) (string, string) {
 }
 
 // setIntroducedBy recursively assigns the direct introducer(s) for each transitive dependency.
-func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
+func setIntroducedBy(node *DependencyNode, rootName string, all map[string]ExtendedDep) {
 	for _, child := range node.Transitive {
 		key := child.Name + "@" + child.Version
 		inf := all[key]
 		if inf.IntroducedBy == "" {
-			inf.IntroducedBy = rootCoord
-		} else if !strings.Contains(inf.IntroducedBy, rootCoord) {
-			inf.IntroducedBy = inf.IntroducedBy + ", " + rootCoord
+			inf.IntroducedBy = rootName
+		} else if !strings.Contains(inf.IntroducedBy, rootName) {
+			inf.IntroducedBy = inf.IntroducedBy + ", " + rootName
 		}
 		all[key] = inf
-		setIntroducedBy(child, rootCoord, all)
+		setIntroducedBy(child, rootName, all)
 	}
-}
-
-func isCopyleft(name string) bool {
-	for spdxID, data := range spdxLicenseMap {
-		if data.Copyleft && (strings.EqualFold(name, data.Name) || strings.EqualFold(name, spdxID)) {
-			return true
-		}
-	}
-	copyleftKeywords := []string{
-		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
-		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
-		"GNU General Public License", "GNU Lesser General Public License",
-		"Mozilla Public License", "Common Development and Distribution License",
-		"Eclipse Public License", "Common Public License", "European Union Public License",
-		"Open Software License",
-	}
-	up := strings.ToUpper(name)
-	for _, kw := range copyleftKeywords {
-		if strings.Contains(up, strings.ToUpper(kw)) {
-			return true
-		}
-	}
-	return false
-}
-
-func detectLicense(pom *MavenPOM) string {
-	if pom == nil || len(pom.Licenses) == 0 {
-		return "Unknown"
-	}
-	lic := strings.TrimSpace(pom.Licenses[0].Name)
-	if lic == "" {
-		return "Unknown"
-	}
-	up := strings.ToUpper(lic)
-	for spdxID, data := range spdxLicenseMap {
-		if strings.EqualFold(lic, spdxID) || up == strings.ToUpper(spdxID) {
-			return data.Name
-		}
-	}
-	return lic
 }
 
 // ----------------------------------------------------------------------
@@ -517,13 +473,13 @@ func pomFetchWorker() {
 // ----------------------------------------------------------------------
 // BFS & TRANSITIVE DEPENDENCY RESOLUTION
 // ----------------------------------------------------------------------
-// The BFS uses a visited map that maps dependency keys ("group/artifact@version") to a set of direct introducers.
+// The BFS uses a visited map that maps dependency keys ("group/artifact@version") to a set of direct introducer names.
 type queueItem struct {
 	GroupArtifact string
 	Version       string
 	Depth         int
 	ParentNode    *DependencyNode
-	Direct        string // the direct dependency coordinate that initiated this path
+	Direct        string // the direct dependency (group/artifact only) that initiated this path
 }
 
 func buildTransitiveClosure(sections []ReportSection) {
@@ -549,14 +505,16 @@ func buildTransitiveClosure(sections []ReportSection) {
 		// Initialize BFS with direct dependencies.
 		for ga, ver := range sec.DirectDeps {
 			key := ga + "@" + ver
+			// Store only the direct dependency name (group/artifact)
+			directName := ga
 			ds := make(introducerSet)
-			ds[key] = true
+			ds[directName] = true
 			visited[key] = ds
 			node := &DependencyNode{
 				Name:    ga,
 				Version: ver,
 				Parent:  "direct",
-				Direct:  key,
+				Direct:  directName,
 			}
 			rootNodes = append(rootNodes, node)
 			queue = append(queue, queueItem{
@@ -564,7 +522,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 				Version:       ver,
 				Depth:         1,
 				ParentNode:    node,
-				Direct:        key,
+				Direct:        directName,
 			})
 		}
 		// BFS loop.
@@ -604,14 +562,16 @@ func buildTransitiveClosure(sections []ReportSection) {
 					}
 				}
 				childKey := childGA + "@" + cv
+				// Update visited: if already visited, add new direct introducer if not present.
 				if vs, exists := visited[childKey]; exists {
 					if !vs[it.Direct] {
 						vs[it.Direct] = true
 						existing := allDeps[childKey]
+						directs := it.Direct
 						if existing.IntroducedBy == "" {
-							existing.IntroducedBy = it.Direct
-						} else if !strings.Contains(existing.IntroducedBy, it.Direct) {
-							existing.IntroducedBy = existing.IntroducedBy + ", " + it.Direct
+							existing.IntroducedBy = directs
+						} else if !strings.Contains(existing.IntroducedBy, directs) {
+							existing.IntroducedBy = existing.IntroducedBy + ", " + directs
 						}
 						allDeps[childKey] = existing
 						childNode := &DependencyNode{
@@ -663,10 +623,10 @@ func buildTransitiveClosure(sections []ReportSection) {
 		for _, root := range rootNodes {
 			fillDepMap(root, allDeps)
 		}
-		// Mark top-level introducers.
+		// Mark top-level introducers for each direct dependency.
 		for _, root := range rootNodes {
-			rootCoord := fmt.Sprintf("%s:%s", root.Name, root.Version)
-			setIntroducedBy(root, rootCoord, allDeps)
+			rootName := root.Name // only the group/artifact
+			setIntroducedBy(root, rootName, allDeps)
 		}
 		sec.AllDeps = allDeps
 		sec.DependencyTree = rootNodes
