@@ -23,7 +23,7 @@ jobs:
         with:
           go-version: '1.20'
 
-      # Step 3: Run the Go code
+      # Step 3: Build and run the license checker
       - name: Run License Checker
         run: |
           go mod init license-checker || true
@@ -31,17 +31,14 @@ jobs:
           go run license.go
           ls -la
           pwd
-          cd license-checker
-          ls -la
-          pwd
 
-      # Step 4: Verify the generated report
+      # Step 4: Verify the generated report exists in the license-checker folder
       - name: Verify Report
         run: |
-          if [ -f ./license-full-bfs-report.html ]; then
-            echo "✅ Maven multi-file report exists!"
+          if [ -f "./license-checker/dependency-license-report.html" ]; then
+            echo "✅ License report exists in license-checker folder!"
           else
-            echo "❌ Maven multi-file report is missing!"
+            echo "❌ License report is missing!"
             exit 1
           fi
 
@@ -50,5 +47,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: license-report
-          path: ./license-full-bfs-report.html
+          path: ./license-checker/dependency-license-report.html
           retention-days: 7
