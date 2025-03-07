@@ -120,7 +120,7 @@ type ExtendedDep struct {
 	Lookup       string // version used for URL construction
 	Parent       string // immediate parent ("direct" if top-level)
 	License      string
-	IntroducedBy string // direct dependency (or comma‑separated list) that introduced this dependency
+	IntroducedBy string // direct dependency (or comma-separated list) that introduced this dependency
 	PomURL       string // actual POM URL used during fetch
 }
 
@@ -355,13 +355,32 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-// splitGA splits a "group/artifact" string into its group and artifact components.
+// ----------------------------------------------------------------------
+// UTILITY FUNCTIONS (Unique Definitions)
+// ----------------------------------------------------------------------
+
+// splitGA splits a "group/artifact" string into its components.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
 		return "", ""
 	}
 	return parts[0], parts[1]
+}
+
+// setIntroducedBy assigns the direct dependency (root) that introduced each transitive dependency.
+func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
+	for _, child := range node.Transitive {
+		key := child.Name + "@" + child.Version
+		inf := all[key]
+		if inf.IntroducedBy == "" {
+			inf.IntroducedBy = rootCoord
+		} else if !strings.Contains(inf.IntroducedBy, rootCoord) {
+			inf.IntroducedBy = inf.IntroducedBy + ", " + rootCoord
+		}
+		all[key] = inf
+		setIntroducedBy(child, rootCoord, all)
+	}
 }
 
 func isCopyleft(name string) bool {
@@ -610,7 +629,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 		for _, root := range rootNodes {
 			fillDepMap(root, allDeps)
 		}
-		// Mark top-level introducers: each direct dependency (root) is the introducer for its descendants.
+		// Mark top-level introducers.
 		for _, root := range rootNodes {
 			rootCoord := fmt.Sprintf("%s:%s", root.Name, root.Version)
 			setIntroducedBy(root, rootCoord, allDeps)
@@ -643,21 +662,6 @@ func fillDepMap(node *DependencyNode, all map[string]ExtendedDep) {
 	all[key] = info
 	for _, child := range node.Transitive {
 		fillDepMap(child, all)
-	}
-}
-
-// setIntroducedBy assigns the direct dependency (root) that introduced each transitive dependency.
-func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
-	for _, child := range node.Transitive {
-		key := child.Name + "@" + child.Version
-		inf := all[key]
-		if inf.IntroducedBy == "" {
-			inf.IntroducedBy = rootCoord
-		} else if !strings.Contains(inf.IntroducedBy, rootCoord) {
-			inf.IntroducedBy = inf.IntroducedBy + ", " + rootCoord
-		}
-		all[key] = inf
-		setIntroducedBy(child, rootCoord, all)
 	}
 }
 
@@ -824,7 +828,7 @@ func generateHTMLReport(sections []ReportSection) error {
 }
 
 // ----------------------------------------------------------------------
-// UTILITY FUNCTIONS (SINGLE DEFINITIONS)
+// UTILITY FUNCTIONS (Unique Definitions)
 // ----------------------------------------------------------------------
 func parseCoord(dep string) string {
 	parts := strings.SplitN(dep, "@", 2)
@@ -873,30 +877,6 @@ func buildPOMLink(depWithVer string) string {
 	}
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, cleanVer, artifact, cleanVer)
-}
-
-// splitGA is defined only once.
-func splitGA(ga string) (string, string) {
-	parts := strings.Split(ga, "/")
-	if len(parts) != 2 {
-		return "", ""
-	}
-	return parts[0], parts[1]
-}
-
-// setIntroducedBy assigns the direct dependency (root) that introduced each transitive dependency.
-func setIntroducedBy(node *DependencyNode, rootCoord string, all map[string]ExtendedDep) {
-	for _, child := range node.Transitive {
-		key := child.Name + "@" + child.Version
-		inf := all[key]
-		if inf.IntroducedBy == "" {
-			inf.IntroducedBy = rootCoord
-		} else if !strings.Contains(inf.IntroducedBy, rootCoord) {
-			inf.IntroducedBy = inf.IntroducedBy + ", " + rootCoord
-		}
-		all[key] = inf
-		setIntroducedBy(child, rootCoord, all)
-	}
 }
 
 // ----------------------------------------------------------------------
