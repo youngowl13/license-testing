@@ -31,6 +31,9 @@ jobs:
           go run license.go
           ls -la
           pwd
+          cd license-checker
+          ls -la
+          pwd
 
       # Step 4: Verify the generated report
       - name: Verify Report
