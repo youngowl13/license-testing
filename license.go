@@ -120,7 +120,7 @@ type ExtendedDep struct {
 	Lookup       string // version used for URL construction
 	Parent       string // immediate parent ("direct" if top-level)
 	License      string
-	IntroducedBy string // direct dependency (or comma-separated list) that introduced this dependency
+	IntroducedBy string // direct dependency (or comma‑separated list) that introduced this dependency
 	PomURL       string // actual POM URL used during fetch
 }
 
@@ -355,7 +355,7 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-// splitGA splits a "group/artifact" string into group and artifact.
+// splitGA splits a "group/artifact" string into its group and artifact components.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -512,7 +512,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 				Lookup:       ver,
 				Parent:       "direct",
 				License:      "",
-				IntroducedBy: "", // For direct dependencies, no introducer needed.
+				IntroducedBy: "",
 				PomURL:       "",
 			}
 		}
@@ -610,7 +610,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 		for _, root := range rootNodes {
 			fillDepMap(root, allDeps)
 		}
-		// Mark top-level introducers.
+		// Mark top-level introducers: each direct dependency (root) is the introducer for its descendants.
 		for _, root := range rootNodes {
 			rootCoord := fmt.Sprintf("%s:%s", root.Name, root.Version)
 			setIntroducedBy(root, rootCoord, allDeps)
@@ -824,7 +824,7 @@ func generateHTMLReport(sections []ReportSection) error {
 }
 
 // ----------------------------------------------------------------------
-// UTILITY FUNCTIONS
+// UTILITY FUNCTIONS (SINGLE DEFINITIONS)
 // ----------------------------------------------------------------------
 func parseCoord(dep string) string {
 	parts := strings.SplitN(dep, "@", 2)
@@ -874,10 +874,6 @@ func buildPOMLink(depWithVer string) string {
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, cleanVer, artifact, cleanVer)
 }
-
-// ----------------------------------------------------------------------
-// SINGLE DEFINITIONS (no duplicates)
-// ----------------------------------------------------------------------
 
 // splitGA is defined only once.
 func splitGA(ga string) (string, string) {
