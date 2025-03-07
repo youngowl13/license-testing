@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,70 +19,34 @@ import (
 )
 
 // ----------------------------------------------------------------------
-// 1) GLOBALS & CONSTANTS
+// 1) GLOBALS
 // ----------------------------------------------------------------------
 
 const (
-	localPOMCacheDir = ".pom-cache"
-	pomWorkerCount   = 10
-	fetchTimeout     = 30 * time.Second
+	localPOMCacheDir = ".pom-cache"      // Disk caching
+	fetchTimeout     = 30 * time.Second  // HTTP GET concurrency
+	workerCount      = 6                 // BFS concurrency
 )
 
 var (
-	pomRequests  = make(chan fetchRequest, 50)
-	wgWorkers    sync.WaitGroup
-	pomCache     sync.Map // key="group:artifact:version" => *MavenPOM
-	parentVisit  sync.Map
+	// BFS concurrency channel
+	pomRequests = make(chan fetchRequest, 50)
+	wgWorkers   sync.WaitGroup
+
+	// In-memory store: key = "group:artifact:version"
+	pomCache sync.Map
+	// For BFS expansions to detect cycles in parent references
+	parentVisit sync.Map
 
 	channelOpen  = true
 	channelMutex sync.Mutex
 )
 
 // ----------------------------------------------------------------------
-// 2) DATA STRUCTS FROM YOUR 3 FILES
+// 2) UTILS: skipScope, copyleft, BFS Node, BFS Section
 // ----------------------------------------------------------------------
 
-// spdxLicenseMap, skipScope, isCopyleft, etc. from your codes
-var spdxLicenseMap = map[string]struct {
-	Name     string
-	Copyleft bool
-}{
-	"MIT":          {Name: "MIT License", Copyleft: false},
-	"Apache-2.0":   {Name: "Apache License 2.0", Copyleft: false},
-	"BSD-2-CLAUSE": {Name: "BSD 2-Clause", Copyleft: false},
-	"BSD-3-CLAUSE": {Name: "BSD 3-Clause", Copyleft: false},
-	"MPL-2.0":      {Name: "Mozilla Public License 2.0", Copyleft: true},
-	"LGPL-2.1":     {Name: "GNU Lesser GPL v2.1", Copyleft: true},
-	"LGPL-3.0":     {Name: "GNU Lesser GPL v3.0", Copyleft: true},
-	"GPL-2.0":      {Name: "GNU GPL v2.0", Copyleft: true},
-	"GPL-3.0":      {Name: "GNU GPL v3.0", Copyleft: true},
-	"AGPL-3.0":     {Name: "GNU Affero GPL v3.0", Copyleft: true},
-}
-
-func isCopyleft(name string) bool {
-	// direct spdx
-	for spdxID, data := range spdxLicenseMap {
-		if data.Copyleft && (strings.EqualFold(name, data.Name) ||
-			strings.EqualFold(name, spdxID)) {
-			return true
-		}
-	}
-	// fallback
-	copyleftKeywords := []string{
-		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA",
-		"MPL", "MOZILLA PUBLIC LICENSE", "EPL", "CPL", "CDDL", "EUPL", "Affero", "OSL", "CeCILL",
-		"GNU General Public License", "GNU Lesser General Public License", "Common Development and Distribution License",
-		"Eclipse Public License", "Common Public License", "European Union Public License", "Open Software License",
-	}
-	up := strings.ToUpper(name)
-	for _, kw := range copyleftKeywords {
-		if strings.Contains(up, strings.ToUpper(kw)) {
-			return true
-		}
-	}
-	return false
-}
-
+// skipScope => same as your code
 func skipScope(scope, optional string) bool {
 	s := strings.ToLower(strings.TrimSpace(scope))
 	if s == "test" || s == "provided" || s == "system" {
@@ -94,17 +58,119 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
-func getLicenseGroup(lic string) int {
-	// used for sorting => copyleft(1), unknown(2), else(3)
-	if isCopyleft(lic) {
+// A comprehensive set of known “copyleft” license indicators:
+var copyleftKeywords = []string{
+	"GPL", "LGPL", "AGPL", "CC-BY-SA", "MPL", "EPL", "CPL", "CDDL",
+	"EUPL", "OSL", "CeCILL",
+	"GNU GENERAL PUBLIC LICENSE",
+	"GNU LESSER GENERAL PUBLIC LICENSE",
+	"GNU AFFERO GENERAL PUBLIC LICENSE",
+	"MOZILLA PUBLIC LICENSE",
+	"COMMON DEVELOPMENT AND DISTRIBUTION LICENSE",
+	"ECLIPSE PUBLIC LICENSE",
+	"COMMON PUBLIC LICENSE",
+	"EUROPEAN UNION PUBLIC LICENSE",
+	"OPEN SOFTWARE LICENSE",
+	"CREATIVE COMMONS ATTRIBUTION-SHAREALIKE",
+}
+
+// isCopyleft => checks for recognized copyleft keywords
+func isCopyleft(lic string) bool {
+	up := strings.ToUpper(lic)
+	for _, kw := range copyleftKeywords {
+		if strings.Contains(up, strings.ToUpper(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
+// For sorting: copyleft => group 1, unknown => group 2, else 3
+func getLicenseGroup(license string) int {
+	if isCopyleft(license) {
 		return 1
-	} else if strings.EqualFold(lic, "unknown") {
+	} else if strings.EqualFold(license, "unknown") {
 		return 2
 	}
 	return 3
 }
 
-// BFS concurrency
+// BFS node
+type BFSNode struct {
+	Name     string // "group/artifact"
+	Version  string
+	License  string
+	Copyleft bool
+	Parent   string // “direct” or “g/a@v”
+	Children []*BFSNode
+}
+
+type BFSSection struct {
+	FilePath  string
+	BFSNodes  []*BFSNode
+	Flattened []FlatDep
+}
+
+// Flatten row
+type FlatDep struct {
+	Name     string
+	Version  string
+	License  string
+	Parent   string
+	Copyleft bool
+	Language string
+	RepoLink string
+}
+
+// ----------------------------------------------------------------------
+// 3) MAVEN POM STRUCT
+// ----------------------------------------------------------------------
+
+type PomLicense struct {
+	Name string `xml:"name"`
+	URL  string `xml:"url"`
+}
+type PomDep struct {
+	GroupID    string `xml:"groupId"`
+	ArtifactID string `xml:"artifactId"`
+	Version    string `xml:"version"`
+	Scope      string `xml:"scope"`
+	Optional   string `xml:"optional"`
+}
+type MavenPOM struct {
+	XMLName     xml.Name    `xml:"project"`
+	Licenses    []PomLicense `xml:"licenses>license"`
+	Dependencies []PomDep    `xml:"dependencies>dependency"`
+	GroupID     string       `xml:"groupId"`
+	ArtifactID  string       `xml:"artifactId"`
+	Version     string       `xml:"version"`
+}
+
+// detectLicense => parse first license
+func detectLicense(mp *MavenPOM) string {
+	if len(mp.Licenses) == 0 {
+		return "Unknown"
+	}
+	lic := strings.TrimSpace(mp.Licenses[0].Name)
+	if lic == "" {
+		return "Unknown"
+	}
+	up := strings.ToUpper(lic)
+	// quick fallback
+	if strings.Contains(up, "APACHE") {
+		return "Apache-2.0"
+	}
+	if strings.Contains(up, "GPL") {
+		return "GPL-3.0"
+	}
+	return lic
+}
+
+// ----------------------------------------------------------------------
+// 4) CONCURRENT BFS WORKER POOL
+// ----------------------------------------------------------------------
+
+// We define the request + result used by BFS concurrency
 type fetchRequest struct {
 	GroupID    string
 	ArtifactID string
@@ -116,130 +182,102 @@ type fetchResult struct {
 	Err error
 }
 
-// POM structs
-type POMDep struct {
-	GroupID    string `xml:"groupId"`
-	ArtifactID string `xml:"artifactId"`
-	Version    string `xml:"version"`
-	Scope      string `xml:"scope"`
-	Optional   string `xml:"optional"`
-}
-type License struct {
-	Name string `xml:"name"`
-	URL  string `xml:"url"`
-}
-type MavenPOM struct {
-	XMLName      xml.Name  `xml:"project"`
-	Licenses     []License `xml:"licenses>license"`
-	Dependencies []POMDep  `xml:"dependencies>dependency"`
-
-	GroupID    string `xml:"groupId"`
-	ArtifactID string `xml:"artifactId"`
-	Version    string `xml:"version"`
-}
-
-// BFS node
-type BFSNode struct {
-	Name       string
-	Version    string
-	License    string
-	Copyleft   bool
-	Parent     string
-	Transitive []*BFSNode
-}
-
-// BFSSection for each file type
-type BFSSection struct {
-	FilePath  string
-	BFSNodes  []*BFSNode
-	Flattened []FlatDep
-}
-
-// Flatten
-type FlatDep struct {
-	Name     string
-	Version  string
-	License  string
-	Parent   string
-	Copyleft bool
-	Language string
-	RepoInfo string
-}
-
-// finalData => final HTML
-type finalData struct {
-	Summary        string
-	PomSections    []BFSSection
-	TomlSections   []BFSSection
-	GradleSections []BFSSection
-}
-
-// ----------------------------------------------------------------------
-// 3) UTILS: SPLITGA, detectLicense, BFS expansions
-// ----------------------------------------------------------------------
-
-func splitGA(ga string) (string, string) {
-	parts := strings.SplitN(ga, "/", 2)
-	if len(parts) != 2 {
-		return "", ""
-	}
-	return parts[0], parts[1]
-}
-
-func detectLicense(p *MavenPOM) string {
-	if len(p.Licenses) == 0 {
-		return "Unknown"
-	}
-	lic := strings.TrimSpace(p.Licenses[0].Name)
-	if lic == "" {
-		return "Unknown"
-	}
-	up := strings.ToUpper(lic)
-	if strings.Contains(up, "APACHE") {
-		return "Apache-2.0"
-	}
-	if strings.Contains(up, "GPL") {
-		return "GPL-3.0"
-	}
-	return lic
-}
-
-// concurrency BFS worker
-func pomWorker() {
+// Worker that attempts to fetch from both repos concurrently
+func concurrencyPomWorker() {
 	defer wgWorkers.Done()
 	for req := range pomRequests {
-		fmt.Printf("[Worker] BFS => %s:%s:%s\n", req.GroupID, req.ArtifactID, req.Version)
-		pm, err := retrieveOrLoadPOM(req.GroupID, req.ArtifactID, req.Version)
-		req.ResultChan <- fetchResult{pm, err}
+		groupID, artifactID, version := req.GroupID, req.ArtifactID, req.Version
+		pom, err := retrieveOrLoadPOMConcurrently(groupID, artifactID, version)
+		req.ResultChan <- fetchResult{pom, err}
 	}
 }
 
-// ----------------------------------------------------------------------
-// 4) local disk caching => from license(1).go
-// ----------------------------------------------------------------------
-
-func retrieveOrLoadPOM(g, a, v string) (*MavenPOM, error) {
+func retrieveOrLoadPOMConcurrently(g, a, v string) (*MavenPOM, error) {
 	key := fmt.Sprintf("%s:%s:%s", g, a, v)
 	if c, ok := pomCache.Load(key); ok {
-		fmt.Printf("   => in-mem cache => %s\n", key)
+		fmt.Printf("[Worker] In-memory cache hit => %s\n", key)
 		return c.(*MavenPOM), nil
 	}
-	p, err := loadPOMFromDisk(g, a, v)
-	if err == nil && p != nil {
-		fmt.Printf("   => local disk => %s\n", key)
-		pomCache.Store(key, p)
-		return p, nil
+	// local disk
+	mp, err := loadPOMFromDisk(g, a, v)
+	if err == nil && mp != nil {
+		fmt.Printf("[Worker] Found on disk => %s\n", key)
+		pomCache.Store(key, mp)
+		return mp, nil
 	}
-	fmt.Printf("   => not on disk => fetch => %s\n", key)
-	rm, e2 := fetchRemotePOM(g, a, v)
+	// parallel approach: spawn two goroutines, one tries google, one tries central
+	// whichever returns first with success is used
+	pom, e2 := fetchPOMParallel(g, a, v)
 	if e2 != nil {
 		return nil, e2
 	}
-	pomCache.Store(key, rm)
-	savePOMToDisk(g, a, v, rm)
-	return rm, nil
+	pomCache.Store(key, pom)
+	savePOMToDisk(g, a, v, pom)
+	return pom, nil
 }
 
+// fetchPOMParallel => tries google + central concurrently
+func fetchPOMParallel(g, a, v string) (*MavenPOM, error) {
+	groupPath := strings.ReplaceAll(g, ".", "/")
+	urlGoogle := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom",
+		groupPath, a, v, a, v)
+	urlCentral := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom",
+		groupPath, a, v, a, v)
+
+	type pomResp struct {
+		pom *MavenPOM
+		err error
+	}
+	ch := make(chan pomResp, 2)
+
+	go func() {
+		pm, e := fetchPOMFromURL(urlGoogle)
+		ch <- pomResp{pm, e}
+	}()
+	go func() {
+		pm, e := fetchPOMFromURL(urlCentral)
+		ch <- pomResp{pm, e}
+	}()
+
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		res := <-ch
+		if res.err == nil && res.pom != nil {
+			return res.pom, nil
+		}
+		if firstErr == nil {
+			firstErr = res.err
+		}
+	}
+	return nil, firstErr
+}
+
+// fetchPOMFromURL => standard GET + parse
+func fetchPOMFromURL(url string) (*MavenPOM, error) {
+	fmt.Printf("   [fetchPOM] GET => %s\n", url)
+	cl := http.Client{Timeout: fetchTimeout}
+	resp, err := cl.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP %d => %s", resp.StatusCode, url)
+	}
+	data, e2 := io.ReadAll(resp.Body)
+	if e2 != nil {
+		return nil, e2
+	}
+	var mp MavenPOM
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	dec.Strict = false
+	if e3 := dec.Decode(&mp); e3 != nil {
+		return nil, e3
+	}
+	return &mp, nil
+}
+
+// local disk caching
 func loadPOMFromDisk(g, a, v string) (*MavenPOM, error) {
 	path := localCachePath(g, a, v)
 	d, err := os.ReadFile(path)
@@ -254,74 +292,36 @@ func loadPOMFromDisk(g, a, v string) (*MavenPOM, error) {
 	}
 	return &mp, nil
 }
-
-func savePOMToDisk(g, a, v string, pom *MavenPOM) {
+func savePOMToDisk(g, a, v string, mp *MavenPOM) {
 	path := localCachePath(g, a, v)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		fmt.Printf("   => mkdirAll => %v\n", err)
+	if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
+		fmt.Printf("[savePOMToDisk] mkdir => %v\n", e)
 		return
 	}
-	f, err := os.Create(path)
-	if err != nil {
-		fmt.Printf("   => create => %v\n", err)
-		return
-	}
-	defer f.Close()
-	dt, e2 := xml.MarshalIndent(pom, "", "  ")
+	out, e2 := os.Create(path)
 	if e2 != nil {
-		fmt.Printf("   => marshal => %v\n", e2)
+		fmt.Printf("[savePOMToDisk] create => %v\n", e2)
 		return
 	}
-	f.Write(dt)
-	fmt.Printf("   => saved => %s\n", path)
+	defer out.Close()
+	data, e3 := xml.MarshalIndent(mp, "", "  ")
+	if e3 != nil {
+		fmt.Printf("[savePOMToDisk] marshal => %v\n", e3)
+		return
+	}
+	out.Write(data)
+	fmt.Printf("[savePOMToDisk] => %s\n", path)
 }
-
 func localCachePath(g, a, v string) string {
 	gp := strings.ReplaceAll(g, ".", "/")
 	return filepath.Join(localPOMCacheDir, gp, a, v, fmt.Sprintf("%s-%s.pom.xml", a, v))
 }
 
-// fetch remote => central, google
-func fetchRemotePOM(g, a, v string) (*MavenPOM, error) {
-	gp := strings.ReplaceAll(g, ".", "/")
-	urlC := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", gp, a, v, a, v)
-	urlG := fmt.Sprintf("https://dl.google.com/dl/android/maven2/%s/%s/%s/%s-%s.pom", gp, a, v, a, v)
-	if pm, e := fetchPOMFromURL(urlC); e == nil && pm != nil {
-		return pm, nil
-	}
-	if pm2, e2 := fetchPOMFromURL(urlG); e2 == nil && pm2 != nil {
-		return pm2, nil
-	}
-	return nil, fmt.Errorf("could not fetch => %s:%s:%s", g, a, v)
-}
-
-func fetchPOMFromURL(url string) (*MavenPOM, error) {
-	cl := http.Client{Timeout: fetchTimeout}
-	resp, err := cl.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d => %s", resp.StatusCode, url)
-	}
-	dat, e2 := io.ReadAll(resp.Body)
-	if e2 != nil {
-		return nil, e2
-	}
-	var mp MavenPOM
-	dec := xml.NewDecoder(bytes.NewReader(dat))
-	dec.Strict = false
-	if e3 := dec.Decode(&mp); e3 != nil {
-		return nil, e3
-	}
-	return &mp, nil
-}
-
 // ----------------------------------------------------------------------
-// 5) BFS expansions for each file type
+// 5) BFS expansions
 // ----------------------------------------------------------------------
 
+// buildFullBFS => unlimited BFS with visited + skipScope
 func buildFullBFS(g, a, v, parent string, visited map[string]bool) *BFSNode {
 	key := fmt.Sprintf("%s/%s@%s", g, a, v)
 	if visited[key] {
@@ -329,67 +329,65 @@ func buildFullBFS(g, a, v, parent string, visited map[string]bool) *BFSNode {
 	}
 	visited[key] = true
 
-	if strings.ToLower(v) == "unknown" {
-		return &BFSNode{
-			Name:   g + "/" + a,
-			Version: v,
-			License: "Unknown",
-			Parent: parent,
-		}
-	}
-	// concurrency BFS => local disk => etc.
-	pom, err := retrieveOrLoadPOM(g, a, v)
-	n := &BFSNode{
+	node := &BFSNode{
 		Name:   g + "/" + a,
 		Version: v,
 		Parent: parent,
 		License: "Unknown",
 	}
-	if err != nil || pom == nil {
-		return n
+	// unknown => skip sub BFS
+	if strings.ToLower(v) == "unknown" {
+		return node
 	}
-	// detect license
+	// concurrency BFS
+	pom, err := retrieveOrLoadPOMConcurrently(g, a, v)
+	if err != nil || pom == nil {
+		return node
+	}
 	lic := detectLicense(pom)
-	n.License  = lic
-	n.Copyleft = isCopyleft(lic)
+	node.License  = lic
+	node.Copyleft = isCopyleft(lic)
 
-	// BFS children
-	for _, d := range pom.Dependencies {
-		if skipScope(d.Scope, d.Optional) {
+	for _, dep := range pom.Dependencies {
+		if skipScope(dep.Scope, dep.Optional) {
 			continue
 		}
-		cg, ca := d.GroupID, d.ArtifactID
-		cv := d.Version
+		cg, ca := dep.GroupID, dep.ArtifactID
+		cv := dep.Version
 		if cv == "" {
 			cv = "unknown"
 		}
-		child := buildFullBFS(cg, ca, cv, n.Name+"@"+v, visited)
+		child := buildFullBFS(cg, ca, cv, node.Name+"@"+v, visited)
 		if child != nil {
-			n.Transitive = append(n.Transitive, child)
+			node.Children = append(node.Children, child)
 		}
 	}
-	return n
+	return node
 }
 
+// flatten BFS => for table
 func flattenBFSNode(n *BFSNode, lang string, out *[]FlatDep) {
 	if n == nil {
 		return
 	}
+	g, a := splitGA(n.Name)
+	link := buildRepoLink(g, a, n.Version)
 	fd := FlatDep{
-		Name:    n.Name,
-		Version: n.Version,
-		License: n.License,
-		Parent:  n.Parent,
+		Name:     n.Name,
+		Version:  n.Version,
+		License:  n.License,
+		Parent:   n.Parent,
 		Copyleft: n.Copyleft,
 		Language: lang,
-		RepoInfo: fmt.Sprintf("https://www.google.com/search?q=%s+%s", n.Name, n.Version),
+		RepoLink: link,
 	}
 	*out = append(*out, fd)
-	for _, c := range n.Transitive {
+	for _, c := range n.Children {
 		flattenBFSNode(c, lang, out)
 	}
 }
 
+// doBFSForDirect => parse direct => BFS => flatten
 func doBFSForDirect(depMap map[string]string, filePath, lang string) BFSSection {
 	visited := make(map[string]bool)
 	var roots []*BFSNode
@@ -401,43 +399,48 @@ func doBFSForDirect(depMap map[string]string, filePath, lang string) BFSSection 
 		}
 	}
 	var flat []FlatDep
-	for _, rt := range roots {
-		flattenBFSNode(rt, lang, &flat)
+	for _, r := range roots {
+		flattenBFSNode(r, lang, &flat)
 	}
 	sort.SliceStable(flat, func(i, j int) bool {
 		g1 := getLicenseGroup(flat[i].License)
 		g2 := getLicenseGroup(flat[j].License)
 		return g1 < g2
 	})
-	return BFSSection{filePath, roots, flat}
+	return BFSSection{
+		FilePath:  filePath,
+		BFSNodes:  roots,
+		Flattened: flat,
+	}
+}
+
+// buildRepoLink => separate logic for display: prefer google if group starts com.android or androidx, else central, else google search
+func buildRepoLink(g, a, v string) string {
+	if g == "" || a == "" || v == "" {
+		return fmt.Sprintf("https://www.google.com/search?q=%s+%s+%s", g, a, v)
+	}
+	if strings.HasPrefix(g, "com.android") || strings.HasPrefix(g, "androidx") {
+		return fmt.Sprintf("https://maven.google.com/web/index.html?q=%s#%s:%s:%s", a, g, a, v)
+	}
+	// else fallback to e.g. mvnrepository
+	return fmt.Sprintf("https://mvnrepository.com/artifact/%s/%s/%s", g, a, v)
 }
 
 // ----------------------------------------------------------------------
-// 6) PARSE each file type EXACTLY as in your code
+// 6) PARSE each file type EXACTLY
 // ----------------------------------------------------------------------
 
-// parseOnePomFile
-func findAllPOMFiles(root string) ([]string, error) {
-	var out []string
-	err := filepath.Walk(root, func(p string, info os.FileInfo, e error) error {
-		if e == nil && !info.IsDir() && strings.EqualFold(info.Name(), "pom.xml") {
-			out = append(out, p)
-		}
-		return e
-	})
-	return out, err
-}
 func parseOnePomFile(filePath string) (map[string]string, error) {
-	dat, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
-	var pom MavenPOM
-	if e2 := xml.Unmarshal(dat, &pom); e2 != nil {
+	var mp MavenPOM
+	if e2 := xml.Unmarshal(data, &mp); e2 != nil {
 		return nil, e2
 	}
-	res := make(map[string]string)
-	for _, d := range pom.Dependencies {
+	deps := make(map[string]string)
+	for _, d := range mp.Dependencies {
 		if skipScope(d.Scope, d.Optional) {
 			continue
 		}
@@ -446,38 +449,40 @@ func parseOnePomFile(filePath string) (map[string]string, error) {
 		if v == "" {
 			v = "unknown"
 		}
-		res[g+"/"+a] = v
+		key := g + "/" + a
+		deps[key] = v
 	}
-	return res, nil
+	return deps, nil
 }
 
-// parseTomlFile
-func findTOMLFiles(root string) ([]string, error) {
+func findAllPOMFiles(root string) ([]string, error) {
 	var out []string
-	err := filepath.Walk(root, func(p string, info os.FileInfo, e error) error {
-		if e == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".toml") {
-			out = append(out, p)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
+		if werr == nil && !info.IsDir() && strings.EqualFold(info.Name(), "pom.xml") {
+			out = append(out, path)
 		}
-		return e
+		return werr
 	})
 	return out, err
 }
+
+// TOML
 func parseTomlFile(filePath string) (map[string]string, error) {
 	tree, err := toml.LoadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
 	deps := make(map[string]string)
-	libs := tree.Get("libraries")
-	if libs == nil {
+	libTree := tree.Get("libraries")
+	if libTree == nil {
 		return deps, nil
 	}
-	libTree, ok := libs.(*toml.Tree)
+	lt, ok := libTree.(*toml.Tree)
 	if !ok {
 		return nil, fmt.Errorf("'libraries' not valid in %s", filePath)
 	}
-	for _, k := range libTree.Keys() {
-		val := libTree.Get(k)
+	for _, k := range lt.Keys() {
+		val := lt.Get(k)
 		sub, ok2 := val.(*toml.Tree)
 		if !ok2 {
 			continue
@@ -496,29 +501,29 @@ func parseTomlFile(filePath string) (map[string]string, error) {
 	}
 	return deps, nil
 }
-
-// parseBuildGradleFile
-func findBuildGradleFiles(root string) ([]string, error) {
+func findTOMLFiles(root string) ([]string, error) {
 	var out []string
-	err := filepath.Walk(root, func(p string, info os.FileInfo, e error) error {
-		if e == nil && !info.IsDir() && strings.EqualFold(info.Name(), "build.gradle") {
-			out = append(out, p)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
+		if werr == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".toml") {
+			out = append(out, path)
 		}
-		return e
+		return werr
 	})
 	return out, err
 }
+
+// Gradle
 func parseBuildGradleFile(filePath string) (map[string]string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
 	content := string(data)
-	res := make(map[string]string)
-	re := regexp.MustCompile(`(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|androidTestImplementation|classpath)\s+['"]([^'"]+)['"]`)
+	out := make(map[string]string)
+	re := regexp.MustCompile(`(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|androidTestImplementation|classpath)\\s+['\"]([^'\"]+)['\"]`)
 	matches := re.FindAllStringSubmatch(content, -1)
-	for _, mm := range matches {
-		coord := mm[2]
+	for _, m := range matches {
+		coord := m[2]
 		pp := strings.Split(coord, ":")
 		if len(pp) < 2 {
 			continue
@@ -528,9 +533,19 @@ func parseBuildGradleFile(filePath string) (map[string]string, error) {
 		if len(pp) >= 3 {
 			v = pp[2]
 		}
-		res[g+"/"+a] = v
+		out[g+"/"+a] = v
 	}
-	return res, nil
+	return out, nil
+}
+func findBuildGradleFiles(root string) ([]string, error) {
+	var out []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
+		if werr == nil && !info.IsDir() && strings.EqualFold(info.Name(), "build.gradle") {
+			out = append(out, path)
+		}
+		return werr
+	})
+	return out, err
 }
 
 // ----------------------------------------------------------------------
@@ -557,7 +572,7 @@ summary{cursor:pointer;font-weight:bold}
 </style>
 </head>
 <body>
-<h1>Consolidated BFS Report for POM, TOML, Gradle (Local .pom-cache approach)</h1>
+<h1>Consolidated BFS Report for POM, TOML, Gradle (Local .pom-cache + concurrency check on both repos)</h1>
 <h2>Summary</h2>
 <p>{{.Summary}}</p>
 
@@ -565,7 +580,7 @@ summary{cursor:pointer;font-weight:bold}
 {{range .PomSections}}
 <h3>File: {{.FilePath}}</h3>
 {{if eq (len .Flattened) 0}}
-<p>No dependencies found in {{.FilePath}}.</p>
+<p>No dependencies found.</p>
 {{else}}
 <table>
 <tr>
@@ -580,10 +595,10 @@ summary{cursor:pointer;font-weight:bold}
 <tr>
   <td>{{.Name}}</td>
   <td>{{.Version}}</td>
-  <td class="{{if eq .License "Unknown"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}">{{.License}}</td>
+  <td class="{{if eq .License \"Unknown\"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}">{{.License}}</td>
   <td>{{.Parent}}</td>
   <td>{{.Language}}</td>
-  <td><a href="{{.RepoInfo}}" target="_blank">Link</a></td>
+  <td><a href=\"{{.RepoLink}}\" target=\"_blank\">Link</a></td>
 </tr>
 {{end}}
 </table>
@@ -601,7 +616,7 @@ summary{cursor:pointer;font-weight:bold}
 {{range .TomlSections}}
 <h3>File: {{.FilePath}}</h3>
 {{if eq (len .Flattened) 0}}
-<p>No dependencies found in {{.FilePath}}.</p>
+<p>No dependencies found.</p>
 {{else}}
 <table>
 <tr>
@@ -616,10 +631,10 @@ summary{cursor:pointer;font-weight:bold}
 <tr>
   <td>{{.Name}}</td>
   <td>{{.Version}}</td>
-  <td class="{{if eq .License "Unknown"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}">{{.License}}</td>
+  <td class=\"{{if eq .License \"Unknown\"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}\">{{.License}}</td>
   <td>{{.Parent}}</td>
   <td>{{.Language}}</td>
-  <td><a href="{{.RepoInfo}}" target="_blank">Link</a></td>
+  <td><a href=\"{{.RepoLink}}\" target=\"_blank\">Link</a></td>
 </tr>
 {{end}}
 </table>
@@ -637,7 +652,7 @@ summary{cursor:pointer;font-weight:bold}
 {{range .GradleSections}}
 <h3>File: {{.FilePath}}</h3>
 {{if eq (len .Flattened) 0}}
-<p>No dependencies found in {{.FilePath}}.</p>
+<p>No dependencies found.</p>
 {{else}}
 <table>
 <tr>
@@ -652,10 +667,10 @@ summary{cursor:pointer;font-weight:bold}
 <tr>
   <td>{{.Name}}</td>
   <td>{{.Version}}</td>
-  <td class="{{if eq .License "Unknown"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}">{{.License}}</td>
+  <td class=\"{{if eq .License \"Unknown\"}}unknown{{else if isCopyleft .License}}copyleft{{else}}non-copyleft{{end}}\">{{.License}}</td>
   <td>{{.Parent}}</td>
   <td>{{.Language}}</td>
-  <td><a href="{{.RepoInfo}}" target="_blank">Link</a></td>
+  <td><a href=\"{{.RepoLink}}\" target=\"_blank\">Link</a></td>
 </tr>
 {{end}}
 </table>
@@ -673,11 +688,12 @@ summary{cursor:pointer;font-weight:bold}
 </html>
 `
 
+// buildBFSHTML => BFS expansions in <details>
 func buildBFSHTML(n *BFSNode) string {
 	if n == nil {
 		return ""
 	}
-	sum := fmt.Sprintf("%s@%s (License=%s)", n.Name, n.Version, n.License)
+	summary := fmt.Sprintf("%s@%s (License=%s)", n.Name, n.Version, n.License)
 	css := "non-copyleft"
 	if n.License == "Unknown" {
 		css = "unknown"
@@ -686,11 +702,11 @@ func buildBFSHTML(n *BFSNode) string {
 	}
 	var sb strings.Builder
 	sb.WriteString("<details class=\"" + css + "\"><summary>")
-	sb.WriteString(template.HTMLEscapeString(sum))
+	sb.WriteString(template.HTMLEscapeString(summary))
 	sb.WriteString("</summary>\n")
-	if len(n.Transitive) > 0 {
+	if len(n.Children) > 0 {
 		sb.WriteString("<ul>\n")
-		for _, c := range n.Transitive {
+		for _, c := range n.Children {
 			sb.WriteString("<li>")
 			sb.WriteString(buildBFSHTML(c))
 			sb.WriteString("</li>\n")
@@ -702,17 +718,15 @@ func buildBFSHTML(n *BFSNode) string {
 }
 
 // ----------------------------------------------------------------------
-// 8) MAIN => merges BFS expansions for POM, TOML, Gradle
+// 9) MAIN
 // ----------------------------------------------------------------------
 
 func main() {
-	// spawn concurrency BFS
-	for i := 0; i < pomWorkerCount; i++ {
+	// Start concurrency BFS
+	for i := 0; i < workerCount; i++ {
 		wgWorkers.Add(1)
-		go pomWorker()
+		go concurrencyPomWorker()
 	}
-
-	fmt.Println("[MAIN] scanning for pom.xml, .toml, build.gradle...")
 
 	// 1) POM
 	pomFiles, _ := findAllPOMFiles(".")
@@ -720,12 +734,12 @@ func main() {
 	var totalPom int
 	for _, pf := range pomFiles {
 		fmt.Printf("[MAIN] Found POM => %s\n", pf)
-		depMap, err := parseOnePomFile(pf)
+		pdeps, err := parseOnePomFile(pf)
 		if err != nil {
-			fmt.Printf("   parseOnePomFile => %v\n", err)
+			fmt.Printf("[POM] parse error => %v\n", err)
 			continue
 		}
-		ps := doBFSForDirect(depMap, pf, "maven")
+		ps := doBFSForDirect(pdeps, pf, "maven")
 		pomSections = append(pomSections, ps)
 		totalPom += len(ps.Flattened)
 	}
@@ -736,16 +750,15 @@ func main() {
 	var totalToml int
 	for _, tf := range tomlFiles {
 		fmt.Printf("[MAIN] Found TOML => %s\n", tf)
-		deps, err := parseTomlFile(tf)
+		tdeps, err := parseTomlFile(tf)
 		if err != nil {
-			fmt.Printf("   parseTomlFile => %v\n", err)
+			fmt.Printf("[TOML] parse error => %v\n", err)
 			continue
 		}
-		if len(deps) == 0 {
-			fmt.Printf("   no libs => %s\n", tf)
+		if len(tdeps) == 0 {
 			continue
 		}
-		ts := doBFSForDirect(deps, tf, "toml")
+		ts := doBFSForDirect(tdeps, tf, "toml")
 		tomlSections = append(tomlSections, ts)
 		totalToml += len(ts.Flattened)
 	}
@@ -756,20 +769,20 @@ func main() {
 	var totalGradle int
 	for _, gf := range gradleFiles {
 		fmt.Printf("[MAIN] Found Gradle => %s\n", gf)
-		dmap, err := parseBuildGradleFile(gf)
+		gdeps, err := parseBuildGradleFile(gf)
 		if err != nil {
-			fmt.Printf("   parseBuildGradleFile => %v\n", err)
+			fmt.Printf("[Gradle] parse error => %v\n", err)
 			continue
 		}
-		if len(dmap) == 0 {
-			fmt.Printf("   no gradle deps => %s\n", gf)
+		if len(gdeps) == 0 {
 			continue
 		}
-		gs := doBFSForDirect(dmap, gf, "gradle")
+		gs := doBFSForDirect(gdeps, gf, "gradle")
 		gradleSections = append(gradleSections, gs)
 		totalGradle += len(gs.Flattened)
 	}
 
+	// close BFS concurrency
 	channelMutex.Lock()
 	channelOpen = false
 	channelMutex.Unlock()
@@ -799,9 +812,16 @@ func main() {
 			}
 		}
 	}
+
 	summary := fmt.Sprintf("POM total:%d, TOML total:%d, Gradle total:%d, Copyleft:%d",
 		totalPom, totalToml, totalGradle, copyleftCount)
 
+	type finalData struct {
+		Summary        string
+		PomSections    []BFSSection
+		TomlSections   []BFSSection
+		GradleSections []BFSSection
+	}
 	data := finalData{
 		Summary:        summary,
 		PomSections:    pomSections,
@@ -817,19 +837,19 @@ func main() {
 	}
 	tmpl, e2 := template.New("report").Funcs(funcMap).Parse(finalTemplate)
 	if e2 != nil {
-		fmt.Printf("Template parse => %v\n", e2)
+		fmt.Printf("[MAIN] Template parse => %v\n", e2)
 		return
 	}
 	out, e3 := os.Create("license-full-bfs-report.html")
 	if e3 != nil {
-		fmt.Printf("Create file => %v\n", e3)
+		fmt.Printf("[MAIN] Create file => %v\n", e3)
 		return
 	}
 	defer out.Close()
 
 	if e4 := tmpl.Execute(out, data); e4 != nil {
-		fmt.Printf("Execute => %v\n", e4)
+		fmt.Printf("[MAIN] Template execute => %v\n", e4)
 		return
 	}
-	fmt.Println("[DONE] license-full-bfs-report.html => BFS expansions for POM, TOML, Gradle + local pom-cache!")
+	fmt.Println("[DONE] license-full-bfs-report.html => BFS expansions for POM, TOML, Gradle with concurrency, no errors!")
 }
