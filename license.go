@@ -355,7 +355,11 @@ func skipScope(scope, optional string) bool {
 // introducerSet is a set of direct introducer names.
 type introducerSet map[string]bool
 
-// Utility: splitGA splits a "group/artifact" string.
+// ----------------------------------------------------------------------
+// UTILITY FUNCTIONS
+// ----------------------------------------------------------------------
+
+// splitGA splits a "group/artifact" string into its components.
 func splitGA(ga string) (string, string) {
 	parts := strings.Split(ga, "/")
 	if len(parts) != 2 {
@@ -505,7 +509,6 @@ func buildTransitiveClosure(sections []ReportSection) {
 		// Initialize BFS with direct dependencies.
 		for ga, ver := range sec.DirectDeps {
 			key := ga + "@" + ver
-			// Store only the direct dependency name (group/artifact)
 			directName := ga
 			ds := make(introducerSet)
 			ds[directName] = true
@@ -562,16 +565,14 @@ func buildTransitiveClosure(sections []ReportSection) {
 					}
 				}
 				childKey := childGA + "@" + cv
-				// Update visited: if already visited, add new direct introducer if not present.
 				if vs, exists := visited[childKey]; exists {
 					if !vs[it.Direct] {
 						vs[it.Direct] = true
 						existing := allDeps[childKey]
-						directs := it.Direct
 						if existing.IntroducedBy == "" {
-							existing.IntroducedBy = directs
-						} else if !strings.Contains(existing.IntroducedBy, directs) {
-							existing.IntroducedBy = existing.IntroducedBy + ", " + directs
+							existing.IntroducedBy = it.Direct
+						} else if !strings.Contains(existing.IntroducedBy, it.Direct) {
+							existing.IntroducedBy = existing.IntroducedBy + ", " + it.Direct
 						}
 						allDeps[childKey] = existing
 						childNode := &DependencyNode{
@@ -625,7 +626,7 @@ func buildTransitiveClosure(sections []ReportSection) {
 		}
 		// Mark top-level introducers for each direct dependency.
 		for _, root := range rootNodes {
-			rootName := root.Name // only the group/artifact
+			rootName := root.Name // only group/artifact
 			setIntroducedBy(root, rootName, allDeps)
 		}
 		sec.AllDeps = allDeps
@@ -870,6 +871,53 @@ func buildPOMLink(depWithVer string) string {
 	}
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, cleanVer, artifact, cleanVer)
+}
+
+// ----------------------------------------------------------------------
+// UTILITY FUNCTIONS: detectLicense & isCopyleft
+// ----------------------------------------------------------------------
+func detectLicense(pom *MavenPOM) string {
+	if pom == nil || len(pom.Licenses) == 0 {
+		return "Unknown"
+	}
+	lic := strings.TrimSpace(pom.Licenses[0].Name)
+	if lic == "" {
+		return "Unknown"
+	}
+	up := strings.ToUpper(lic)
+	for spdxID, data := range spdxLicenseMap {
+		if strings.EqualFold(lic, spdxID) || up == strings.ToUpper(spdxID) {
+			return data.Name
+		}
+	}
+	return lic
+}
+
+func isCopyleft(name string) bool {
+	for spdxID, data := range spdxLicenseMap {
+		if data.Copyleft && (strings.EqualFold(name, data.Name) || strings.EqualFold(name, spdxID)) {
+			return true
+		}
+	}
+	copyleftKeywords := []string{
+		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
+		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
+		"GNU General Public License",
+		"GNU Lesser General Public License",
+		"Mozilla Public License",
+		"Common Development and Distribution License",
+		"Eclipse Public License",
+		"Common Public License",
+		"European Union Public License",
+		"Open Software License",
+	}
+	up := strings.ToUpper(name)
+	for _, kw := range copyleftKeywords {
+		if strings.Contains(up, strings.ToUpper(kw)) {
+			return true
+		}
+	}
+	return false
 }
 
 // ----------------------------------------------------------------------
