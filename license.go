@@ -21,7 +21,7 @@ import (
 // CONFIGURATION
 // ----------------------------------------------------------------------
 const (
-	localPOMCacheDir = ".pom-cache"     // On-disk cache (structure in place for future use)
+	localPOMCacheDir = ".pom-cache"     // On-disk cache directory (structure in place for future use)
 	pomWorkerCount   = 10               // Number of concurrent POM fetch workers
 	fetchTimeout     = 30 * time.Second // HTTP client timeout
 	outputReport     = "license-checker/dependency-license-report.html"
@@ -103,7 +103,7 @@ type MavenPOM struct {
 	} `xml:"parent"`
 }
 
-// DependencyNode represents a node in the BFS tree.
+// DependencyNode represents a node in the dependency tree.
 type DependencyNode struct {
 	Name       string
 	Version    string
@@ -140,8 +140,6 @@ type ReportSection struct {
 // ----------------------------------------------------------------------
 // FILE DISCOVERY & PARSING FUNCTIONS
 // ----------------------------------------------------------------------
-
-// findAllPOMFiles recursively finds all pom.xml files.
 func findAllPOMFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -156,7 +154,6 @@ func findAllPOMFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// parseOneLocalPOMFile parses a pom.xml and returns its direct dependencies.
 func parseOneLocalPOMFile(filePath string) (map[string]string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -183,7 +180,6 @@ func parseOneLocalPOMFile(filePath string) (map[string]string, error) {
 	return deps, nil
 }
 
-// findAllTOMLFiles recursively finds all .toml files.
 func findAllTOMLFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -198,7 +194,6 @@ func findAllTOMLFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// parseTOMLFile parses a libs.versions.toml file and returns its direct dependencies.
 func parseTOMLFile(filePath string) (map[string]string, error) {
 	deps := make(map[string]string)
 	tree, err := toml.LoadFile(filePath)
@@ -247,7 +242,6 @@ func parseTOMLFile(filePath string) (map[string]string, error) {
 	return deps, nil
 }
 
-// loadVersions loads the [versions] table from a TOML file.
 func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	versions := make(map[string]string)
 	vTree := tree.Get("versions")
@@ -267,7 +261,6 @@ func loadVersions(tree *toml.Tree) (map[string]string, error) {
 	return versions, nil
 }
 
-// findAllGradleFiles recursively finds all build.gradle and build.gradle.kts files.
 func findAllGradleFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -283,7 +276,6 @@ func findAllGradleFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// parseBuildGradleFile parses a Gradle build file and returns its direct dependencies.
 func parseBuildGradleFile(filePath string) (map[string]string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -325,7 +317,6 @@ func parseBuildGradleFile(filePath string) (map[string]string, error) {
 	return deps, nil
 }
 
-// parseGradleVariables extracts variable definitions from a Gradle file.
 func parseGradleVariables(content string) map[string]string {
 	vars := make(map[string]string)
 	re := regexp.MustCompile(`(?m)^\s*def\s+(\w+)\s*=\s*["']([^"']+)["']`)
@@ -338,7 +329,6 @@ func parseGradleVariables(content string) map[string]string {
 	return vars
 }
 
-// parseVersionRange returns the lower bound of a version range or the version as-is.
 func parseVersionRange(v string) string {
 	v = strings.TrimSpace(v)
 	if (strings.HasPrefix(v, "[") || strings.HasPrefix(v, "(")) && strings.Contains(v, ",") {
@@ -365,13 +355,20 @@ func skipScope(scope, optional string) bool {
 	return false
 }
 
+func splitGA(ga string) (string, string) {
+	parts := strings.Split(ga, "/")
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
 func isCopyleft(name string) bool {
 	for spdxID, data := range spdxLicenseMap {
 		if data.Copyleft && (strings.EqualFold(name, data.Name) || strings.EqualFold(name, spdxID)) {
 			return true
 		}
 	}
-	// Check additional keywords
 	copyleftKeywords := []string{
 		"GPL", "LGPL", "AGPL", "CC BY-SA", "CC-BY-SA", "MPL", "EPL", "CPL",
 		"CDDL", "EUPL", "Affero", "OSL", "CeCILL",
@@ -410,7 +407,6 @@ func detectLicense(pom *MavenPOM) string {
 	return lic
 }
 
-// fetchRemotePOM attempts to fetch the POM from Maven Central first, then Google Maven.
 func fetchRemotePOM(group, artifact, version string) (*MavenPOM, string, error) {
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	urlCentral := fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, version, artifact, version)
@@ -457,12 +453,10 @@ func fetchRemotePOM(group, artifact, version string) (*MavenPOM, string, error) 
 	return nil, "", fmt.Errorf("could not fetch POM for %s:%s:%s", group, artifact, version)
 }
 
-// concurrentFetchPOM uses the worker pool to fetch a POM or directly if closed.
 func concurrentFetchPOM(group, artifact, version string) (*MavenPOM, string, error) {
 	key := fmt.Sprintf("%s:%s:%s", group, artifact, version)
 	if cached, ok := pomCache.Load(key); ok {
 		fmt.Printf("[FETCH-CACHE] HIT => %s\n", key)
-		// Cached POM does not have URL info, so return empty URL.
 		return cached.(*MavenPOM), "", nil
 	}
 	channelMutex.Lock()
@@ -491,7 +485,6 @@ func concurrentFetchPOM(group, artifact, version string) (*MavenPOM, string, err
 	return res.POM, res.UsedURL, res.Err
 }
 
-// pomFetchWorker processes fetch requests concurrently.
 func pomFetchWorker() {
 	defer wgWorkers.Done()
 	for req := range pomRequests {
@@ -502,7 +495,9 @@ func pomFetchWorker() {
 	}
 }
 
-// buildTransitiveClosure performs a BFS to resolve transitive dependencies.
+// ----------------------------------------------------------------------
+// BFS TRANSITIVE DEPENDENCY RESOLUTION
+// ----------------------------------------------------------------------
 func buildTransitiveClosure(sections []ReportSection) {
 	for i := range sections {
 		sec := &sections[i]
@@ -626,8 +621,8 @@ func buildTransitiveClosure(sections []ReportSection) {
 
 func fillDepMap(node *DependencyNode, all map[string]ExtendedDep) {
 	key := node.Name + "@" + node.Version
-	info, ok := all[key]
-	if !ok {
+	info, exists := all[key]
+	if !exists {
 		info = ExtendedDep{
 			Display: node.Version,
 			Lookup:  node.Version,
@@ -871,11 +866,20 @@ func buildPOMLink(depWithVer string) string {
 	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s.pom", groupPath, artifact, ver, artifact, ver)
 }
 
+// splitGA splits a "group/artifact" string into its parts.
+func splitGA(ga string) (string, string) {
+	parts := strings.Split(ga, "/")
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
 // ----------------------------------------------------------------------
 // MAIN FUNCTION
 // ----------------------------------------------------------------------
 func main() {
-	// Start worker pool.
+	// Start the POM fetch worker pool.
 	for i := 0; i < pomWorkerCount; i++ {
 		wgWorkers.Add(1)
 		go pomFetchWorker()
@@ -949,14 +953,14 @@ func main() {
 	fmt.Println("Starting BFS to resolve transitive dependencies...")
 	buildTransitiveClosure(sections)
 
-	// Shut down worker pool.
+	// Shut down the worker pool.
 	channelMutex.Lock()
 	channelOpen = false
 	channelMutex.Unlock()
 	close(pomRequests)
 	wgWorkers.Wait()
 
-	// Compute summary counts.
+	// Compute summary counts for each section.
 	for i := range sections {
 		sec := &sections[i]
 		var directCount, indirectCount, copyleftCount, unknownCount int
